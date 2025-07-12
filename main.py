@@ -18,10 +18,11 @@ if __name__ == "__main__":
     model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
 
     # Load and preprocess example images (replace with your own image paths)
-    image_names = ["path/to/imageA.png", "path/to/imageB.png", "path/to/imageC.png"]  
+    image_names = ["testdata/frame_00062.png", "testdata/frame_00097.png", "testdata/frame_00176.png", "testdata/frame_00268.png"]  
     images = load_and_preprocess_images(image_names).to(device)
 
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             # Predict attributes including cameras, depth maps, and point maps.
             predictions = model(images)
+            print(predictions)

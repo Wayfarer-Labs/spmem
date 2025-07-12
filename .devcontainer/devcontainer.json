@@ -8,6 +8,9 @@
         "--gpus", "all",
         "--shm-size=2g"
     ],
+    "mounts": [
+        "source=${localWorkspaceFolder}/testdata,target=/workspace/testdata,type=bind,consistency=cached"
+    ],
     "workspaceFolder": "/workspace",
     "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
     "customizations": {
