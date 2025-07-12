@@ -85,6 +85,8 @@ if __name__ == "__main__":
     image_names = glob.glob("testdata/*.png")  # Load all PNG images from testdata directory
     print(f"Found {len(image_names)} images in testdata directory.")
     print(image_names)
+    # skip every other image for testing
+    image_names = image_names[::5]  # Take every second image
     image_names = image_names[:50]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -129,10 +131,12 @@ if __name__ == "__main__":
             # Reshape everything to 1D
             world_points_flat = world_points.reshape(-1, 3)
             colors_flat = image_colors.reshape(-1, 3)
-            conf_flat = world_points_conf.reshape(-1)
+            conf_flat = world_points_conf.reshape(-1) - 1
             
             # Filter by confidence (keep points with confidence > threshold)
-            conf_threshold = 0.1  # Adjust this threshold as needed
+            print(conf_flat.min())
+            print(conf_flat.max())
+            conf_threshold = 0.001  # Adjust this threshold as needed
             valid_mask = conf_flat > conf_threshold
             
             valid_points = world_points_flat[valid_mask]
