@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
+import glob
 
 def extract_colors_from_images(world_points, images, world_points_conf, conf_threshold=0.1):
     """
@@ -81,6 +82,10 @@ def export_ply(points, filename):
             f.write(f"{point[0]} {point[1]} {point[2]}\n")
 
 if __name__ == "__main__":
+    image_names = glob.glob("testdata/*.png")  # Load all PNG images from testdata directory
+    print(f"Found {len(image_names)} images in testdata directory.")
+    print(image_names)
+    image_names = image_names[:50]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     # Determine dtype based on device and GPU capability
@@ -96,7 +101,7 @@ if __name__ == "__main__":
     model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
 
     # Load and preprocess example images (replace with your own image paths)
-    image_names = ["testdata/frame_00062.png", "testdata/frame_00097.png", "testdata/frame_00176.png", "testdata/frame_00268.png"]  
+    # image_names = ["testdata/frame_00062.png", "testdata/frame_00097.png", "testdata/frame_00176.png", "testdata/frame_00268.png"]  
     images = load_and_preprocess_images(image_names).to(device)
 
     with torch.no_grad():
