@@ -4,10 +4,11 @@
         "dockerfile": "../Dockerfile",
         "context": ".."
     },
-    "runArgs": [
-        "--gpus", "all",
-        "--shm-size=2g"
-    ],
+	"runArgs": [
+		"--gpus=all",
+		"--shm-size=8g",
+		"--env-file", ".env"
+	],
     "mounts": [
         "source=${localWorkspaceFolder}/testdata,target=/workspace/testdata,type=bind,consistency=cached"
     ],
@@ -26,6 +27,5 @@
             ]
         }
     },
-    "postCreateCommand": "uv sync",
     "forwardPorts": [8888]
 }
