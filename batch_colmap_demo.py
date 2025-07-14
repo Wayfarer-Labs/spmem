@@ -193,56 +193,10 @@ def merge_batch_results(batch_results, args):
         raw_pts = result['points_3d']  # shape (B, H, W, 3) or (H, W, 3)
         if raw_pts.ndim == 3:
             raw_pts = raw_pts[np.newaxis, ...]
-        if idx == 0:
-            # First batch: use raw poses and points
-            aligned_ex = raw_ex
-            aligned_pts = raw_pts
-        else:
-            # Align first frame of this batch to last frame of previous batch
-            prev_last = aligned_extrinsics[-1][-1]  # last frame global pose
-            curr_first = raw_ex[0]                  # first frame batch-local pose
-            
-            # Debug shapes
-            print(f"Batch {idx}: prev_last shape: {prev_last.shape}, curr_first shape: {curr_first.shape}")
-            print(f"Batch {idx}: raw_ex shape: {raw_ex.shape}, raw_pts shape: {raw_pts.shape}")
-            
-            # Handle both 3x4 and 4x4 matrices
-            def to_homogeneous(matrix):
-                if matrix.shape == (3, 4):
-                    # Convert 3x4 to 4x4 by adding [0,0,0,1] row
-                    bottom_row = np.array([[0, 0, 0, 1]])
-                    return np.vstack([matrix, bottom_row])
-                elif matrix.shape == (4, 4):
-                    return matrix
-                else:
-                    raise ValueError(f"Invalid matrix shape: {matrix.shape}")
-            
-            try:
-                prev_last_4x4 = to_homogeneous(prev_last)
-                curr_first_4x4 = to_homogeneous(curr_first)
-                T = prev_last_4x4 @ np.linalg.inv(curr_first_4x4)
-                
-                # Convert raw_ex to 4x4 if needed for transformation
-                raw_ex_4x4 = np.array([to_homogeneous(ex) for ex in raw_ex])
-                aligned_ex_4x4 = np.einsum('ij,bjk->bik', T, raw_ex_4x4)
-                
-                # Convert back to original shape
-                if raw_ex.shape[-2:] == (3, 4):
-                    aligned_ex = aligned_ex_4x4[:, :3, :]
-                else:
-                    aligned_ex = aligned_ex_4x4
-                
-                # Apply same transform to batch points
-                R = T[:3, :3]
-                t = T[:3, 3]
-                aligned_pts = raw_pts @ R.T + t
-                print(f"Successfully aligned batch {idx}")
-            except (np.linalg.LinAlgError, ValueError) as e:
-                print(f"Warning: Alignment error for batch {idx}: {e}")
-                aligned_ex = raw_ex
-                aligned_pts = raw_pts
-        aligned_extrinsics.append(aligned_ex)
-        aligned_points.append(aligned_pts)
+        
+        # Use raw data without alignment
+        aligned_extrinsics.append(raw_ex)
+        aligned_points.append(raw_pts)
         # Intrinsics and other data can be concatenated directly
         all_intrinsic.append(result['intrinsic'])
         all_depth_maps.append(result['depth_map'])
@@ -289,10 +243,120 @@ def create_reconstruction_from_merged_data(merged_data, args, vggt_fixed_resolut
     image_paths = merged_data['image_paths']
     
     if args.use_ba:
-        print("Bundle adjustment not yet implemented for batch processing")
-        print("Falling back to feedforward reconstruction")
-        args.use_ba = False
+        print("Running Bundle Adjustment on merged batches...")
+        
+        # For BA, we need to use tracking between frames
+        # Load all images again for tracking (memory intensive but necessary for BA)
+        all_image_paths_full = [os.path.join(args.scene_dir, "images", img_path) for img_path in image_paths]
+        
+        # Process in chunks to manage memory for tracking
+        chunk_size = min(50, len(all_image_paths_full))  # Smaller chunks for tracking
+        
+        # Initialize tracking data
+        all_pred_tracks = []
+        all_pred_vis_scores = []
+        all_pred_confs = []
+        all_points_3d_tracked = []
+        all_points_rgb_tracked = []
+        
+        print(f"Running tracking across {len(all_image_paths_full)} images in chunks of {chunk_size}")
+        
+        for i in range(0, len(all_image_paths_full), chunk_size):
+            end_idx = min(i + chunk_size, len(all_image_paths_full))
+            chunk_paths = all_image_paths_full[i:end_idx]
+            
+            # Load images for tracking
+            chunk_images, _ = load_and_preprocess_images_square(chunk_paths, img_load_resolution)
+            chunk_images = chunk_images.cuda()
+            
+            # Get corresponding depth data
+            chunk_depth_conf = depth_conf[i:end_idx]
+            chunk_points_3d = points_3d[i:end_idx]
+            
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                # Run tracking on this chunk
+                pred_tracks, pred_vis_scores, pred_confs, tracked_points_3d, tracked_points_rgb = predict_tracks(
+                    chunk_images,
+                    conf=chunk_depth_conf,
+                    points_3d=chunk_points_3d,
+                    masks=None,
+                    max_query_pts=args.max_query_pts,
+                    query_frame_num=min(args.query_frame_num, len(chunk_paths)),
+                    keypoint_extractor="aliked+sp",
+                    fine_tracking=args.fine_tracking,
+                )
+                
+                # Adjust track indices to global frame indices
+                if len(pred_tracks) > 0:
+                    pred_tracks[:, :, 0] += i  # Adjust frame indices
+                
+                all_pred_tracks.append(pred_tracks)
+                all_pred_vis_scores.append(pred_vis_scores)
+                all_pred_confs.append(pred_confs)
+                all_points_3d_tracked.append(tracked_points_3d)
+                all_points_rgb_tracked.append(tracked_points_rgb)
+            
+            del chunk_images
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        # Merge tracking results
+        if all_pred_tracks:
+            merged_tracks = np.concatenate(all_pred_tracks, axis=0) if len(all_pred_tracks) > 1 else all_pred_tracks[0]
+            merged_vis_scores = np.concatenate(all_pred_vis_scores, axis=0) if len(all_pred_vis_scores) > 1 else all_pred_vis_scores[0]
+            merged_confs = np.concatenate(all_pred_confs, axis=0) if len(all_pred_confs) > 1 else all_pred_confs[0]
+            merged_tracked_points_3d = np.concatenate(all_points_3d_tracked, axis=0) if len(all_points_3d_tracked) > 1 else all_points_3d_tracked[0]
+            merged_tracked_points_rgb = np.concatenate(all_points_rgb_tracked, axis=0) if len(all_points_rgb_tracked) > 1 else all_points_rgb_tracked[0]
+        else:
+            print("Warning: No tracks found, falling back to feedforward reconstruction")
+            args.use_ba = False
+        
+        if args.use_ba and len(merged_tracks) > 0:
+            # Rescale intrinsics from VGGT resolution to load resolution
+            scale = img_load_resolution / vggt_fixed_resolution
+            intrinsic_scaled = intrinsic.copy()
+            intrinsic_scaled[:, :2, :] *= scale
+            
+            image_size = np.array([img_load_resolution, img_load_resolution])
+            track_mask = merged_vis_scores > args.vis_thresh
+            shared_camera = args.shared_camera
+            
+            print(f"Creating COLMAP reconstruction with {len(merged_tracks)} tracks")
+            reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
+                merged_tracked_points_3d,
+                extrinsic,
+                intrinsic_scaled,
+                merged_tracks,
+                image_size,
+                masks=track_mask,
+                max_reproj_error=args.max_reproj_error,
+                shared_camera=shared_camera,
+                camera_type=args.camera_type,
+                points_rgb=merged_tracked_points_rgb,
+            )
+            
+            if reconstruction is None:
+                print("Warning: BA reconstruction failed, falling back to feedforward")
+                args.use_ba = False
+            else:
+                print("Running Bundle Adjustment...")
+                ba_options = pycolmap.BundleAdjustmentOptions()
+                pycolmap.bundle_adjustment(reconstruction, ba_options)
+                reconstruction_resolution = img_load_resolution
+                
+                # Extract final points for return
+                points_3d_final = []
+                points_rgb_final = []
+                for point3D in reconstruction.points3D.values():
+                    points_3d_final.append(point3D.xyz)
+                    points_rgb_final.append(point3D.color)
+                
+                points_3d_final = np.array(points_3d_final)
+                points_rgb_final = np.array(points_rgb_final)
+                
+                return reconstruction, points_3d_final, points_rgb_final
     
+    # Fallback to feedforward reconstruction
     if not args.use_ba:
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 500000  # Increased for large scenes

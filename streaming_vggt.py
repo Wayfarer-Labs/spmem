@@ -291,7 +291,7 @@ def get_fps(url):
     fps = float(num) / float(den)
     return fps
 
-def process_batch(model, frames, batch_index, video_name, s3_client, target_bucket, start_idx=0, pipeline=None):
+def process_batch(model, frames, batch_index, video_name, s3_client, target_bucket):
     """
     Process a batch of frames using VGGT model.
     `frames` is a list/array of shape [batch_size, H, W, C]
@@ -442,13 +442,13 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
 
         batch.append(frame)
         if len(batch) >= batch_size:
-            process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket, start_idx)
+            process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket)
             batch = []
             batch_idx += 1
 
     # final partial batch
     if batch:
-        process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket, start_idx)
+        process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket)
 
     process.wait()
 
