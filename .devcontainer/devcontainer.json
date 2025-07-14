@@ -10,7 +10,8 @@
 		"--env-file", ".env"
 	],
     "mounts": [
-        "source=${localWorkspaceFolder}/testdata,target=/workspace/testdata,type=bind,consistency=cached"
+        "source=${localWorkspaceFolder}/testdata,target=/workspace/testdata,type=bind,consistency=cached",
+        "source=${localWorkspaceFolder}/../../cod-output,target=/workspace/cod-output,type=bind,consistency=cached"
     ],
     "workspaceFolder": "/workspace",
     "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
