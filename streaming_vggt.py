@@ -339,9 +339,15 @@ def process_batch(model, frames, batch_index, video_name, s3_client, target_buck
     # Only upload if we successfully generated PLY data
     if ply_bytes:
         # upload colored point cloud as tensor to S3
-        s3_key = f"{video_name}/batch_{batch_index}_pointcloud.ply"
-        s3_client.put_object(Bucket=target_bucket, Key=s3_key, Body=ply_bytes)
-        print(f"Uploaded batch {batch_index} pointcloud to s3://{target_bucket}/{s3_key}")
+        # s3_key = f"{video_name}/batch_{batch_index}_pointcloud.ply"
+        # s3_client.put_object(Bucket=target_bucket, Key=s3_key, Body=ply_bytes)
+        # print(f"Uploaded batch {batch_index} pointcloud to s3://{target_bucket}/{s3_key}")
+
+        # write to local file for debugging
+        local_path = os.path.join(OUTPUT_DIR, f"{video_name}_batch_{batch_index}_pointcloud.ply")
+        with open(local_path, 'wb') as f:
+            f.write(ply_bytes)
+        print(f"Saved batch {batch_index} pointcloud to {local_path}")
     else:
         print(f"Warning: No PLY data generated for batch {batch_index}")
 
@@ -393,7 +399,8 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
         print("Batch count unavailable (nb_frames missing)")
 
     fps = get_fps(url)
-    start_seconds = start_idx / fps
+    # start_seconds = start_idx / fps
+    start_seconds = 50
 
     # 2) Launch ffmpeg as a subprocess, outputting rawvideo RGB24 to stdout
 
@@ -402,30 +409,23 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
     recon_args = ['-reconnect', '1',
                   '-reconnect_streamed', '1',
                   '-reconnect_delay_max', '2']
-    if start_idx > 0:
-        process = (
-            ffmpeg
-            .input(url, ss=start_seconds)
-            .filter('setpts', 'PTS-STARTPTS')
-            .filter('scale', -1, 336)  # ensure correct resolution
-            .output('pipe:', format='rawvideo', pix_fmt='rgb24')
-            .global_args(*recon_args)
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
-    else:
-        process = (
-            ffmpeg
-            .input(url)
-            .filter('scale', -1, 336)  # ensure correct resolution
-            .output('pipe:', format='rawvideo', pix_fmt='rgb24')
-            .global_args(*recon_args)
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
+
+    process = (
+        ffmpeg
+        .input(url, ss=start_seconds)
+        .filter('scale', -1, 1080)  # ensure correct resolution
+        .output('pipe:', format='rawvideo', pix_fmt='rgb24')
+        .global_args(*recon_args)
+        .run_async(pipe_stdout=True, pipe_stderr=True)
+    )
 
     frame_size = width * height * 3  # bytes per frame
     # initialize batch and batch counter
     batch = []
     batch_idx = 0
+    frame_count = 50
+    idx = 0
+
     # read frames
     while True:
         # read exactly one frame
@@ -440,11 +440,18 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
             .reshape((height, width, 3))
         )
 
+        if idx < frame_count:
+            idx += 1
+            print(".", end="", flush=True)
+            continue
+
         batch.append(frame)
         if len(batch) >= batch_size:
             process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket)
             batch = []
             batch_idx += 1
+            idx = 0
+            
 
     # final partial batch
     if batch:
@@ -500,7 +507,7 @@ def main():
         return
 
     # Stream & batch-process each
-    for key in tqdm(keys, desc="Videos", unit="video"):
+    for key in tqdm(keys[2:], desc="Videos", unit="video"):
         url = get_presigned_url(s3, args.bucket, key)
         process_streaming_video(model, url, batch_size=args.frame_batch_size,
                                 s3_client=s3, target_bucket=args.target_bucket)

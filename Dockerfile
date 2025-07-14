@@ -27,10 +27,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN curl -LsSf https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz | tar -xzC /usr/local/bin --strip-components=1
 
 # Copy project files
 COPY . /workspace
+
+RUN uv sync
 
 # Default command
 CMD ["uv", "run", "main.py"]
