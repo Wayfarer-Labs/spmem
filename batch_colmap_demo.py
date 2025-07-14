@@ -176,30 +176,86 @@ def merge_batch_results(batch_results, args):
     """
     print(f"Merging {len(batch_results)} batch results...")
     
-    # Collect all data
-    all_extrinsic = []
+    # Align batch results to global coordinate using overlapping frames
+    overlap = args.overlap_frames
+    aligned_extrinsics = []
+    aligned_points = []
     all_intrinsic = []
     all_depth_maps = []
     all_depth_conf = []
-    all_points_3d = []
     all_original_coords = []
     all_image_paths = []
-    
-    for result in batch_results:
-        all_extrinsic.append(result['extrinsic'])
+    for idx, result in enumerate(batch_results):
+        raw_ex = result['extrinsic']  # shape (B, 4, 4) or (4, 4)
+        # ensure batch dimension
+        if raw_ex.ndim == 2:
+            raw_ex = raw_ex[np.newaxis, ...]
+        raw_pts = result['points_3d']  # shape (B, H, W, 3) or (H, W, 3)
+        if raw_pts.ndim == 3:
+            raw_pts = raw_pts[np.newaxis, ...]
+        if idx == 0:
+            # First batch: use raw poses and points
+            aligned_ex = raw_ex
+            aligned_pts = raw_pts
+        else:
+            # Align first frame of this batch to last frame of previous batch
+            prev_last = aligned_extrinsics[-1][-1]  # last frame global pose
+            curr_first = raw_ex[0]                  # first frame batch-local pose
+            
+            # Debug shapes
+            print(f"Batch {idx}: prev_last shape: {prev_last.shape}, curr_first shape: {curr_first.shape}")
+            print(f"Batch {idx}: raw_ex shape: {raw_ex.shape}, raw_pts shape: {raw_pts.shape}")
+            
+            # Handle both 3x4 and 4x4 matrices
+            def to_homogeneous(matrix):
+                if matrix.shape == (3, 4):
+                    # Convert 3x4 to 4x4 by adding [0,0,0,1] row
+                    bottom_row = np.array([[0, 0, 0, 1]])
+                    return np.vstack([matrix, bottom_row])
+                elif matrix.shape == (4, 4):
+                    return matrix
+                else:
+                    raise ValueError(f"Invalid matrix shape: {matrix.shape}")
+            
+            try:
+                prev_last_4x4 = to_homogeneous(prev_last)
+                curr_first_4x4 = to_homogeneous(curr_first)
+                T = prev_last_4x4 @ np.linalg.inv(curr_first_4x4)
+                
+                # Convert raw_ex to 4x4 if needed for transformation
+                raw_ex_4x4 = np.array([to_homogeneous(ex) for ex in raw_ex])
+                aligned_ex_4x4 = np.einsum('ij,bjk->bik', T, raw_ex_4x4)
+                
+                # Convert back to original shape
+                if raw_ex.shape[-2:] == (3, 4):
+                    aligned_ex = aligned_ex_4x4[:, :3, :]
+                else:
+                    aligned_ex = aligned_ex_4x4
+                
+                # Apply same transform to batch points
+                R = T[:3, :3]
+                t = T[:3, 3]
+                aligned_pts = raw_pts @ R.T + t
+                print(f"Successfully aligned batch {idx}")
+            except (np.linalg.LinAlgError, ValueError) as e:
+                print(f"Warning: Alignment error for batch {idx}: {e}")
+                aligned_ex = raw_ex
+                aligned_pts = raw_pts
+        aligned_extrinsics.append(aligned_ex)
+        aligned_points.append(aligned_pts)
+        # Intrinsics and other data can be concatenated directly
         all_intrinsic.append(result['intrinsic'])
         all_depth_maps.append(result['depth_map'])
         all_depth_conf.append(result['depth_conf'])
-        all_points_3d.append(result['points_3d'])
         all_original_coords.append(result['original_coords'])
         all_image_paths.extend(result['image_paths'])
     
-    # Concatenate arrays
-    merged_extrinsic = np.concatenate(all_extrinsic, axis=0)
+    # Concatenate aligned arrays
+    merged_extrinsic = np.concatenate(aligned_extrinsics, axis=0)
     merged_intrinsic = np.concatenate(all_intrinsic, axis=0)
     merged_depth_maps = np.concatenate(all_depth_maps, axis=0)
     merged_depth_conf = np.concatenate(all_depth_conf, axis=0)
-    merged_points_3d = np.concatenate(all_points_3d, axis=0)
+    merged_points_3d = np.concatenate(aligned_points, axis=0)
     merged_original_coords = np.concatenate(all_original_coords, axis=0)
     
     print(f"Merged data shapes:")
@@ -240,7 +296,7 @@ def create_reconstruction_from_merged_data(merged_data, args, vggt_fixed_resolut
     if not args.use_ba:
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 500000  # Increased for large scenes
-        shared_camera = False  # in the feedforward manner, we do not support shared camera
+        shared_camera = True  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
         image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
