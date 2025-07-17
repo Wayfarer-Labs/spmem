@@ -51,140 +51,33 @@ import math
 import subprocess
 import json
 from torchvision import transforms as TF
+import torch.nn.functional as F
+import copy
+import trimesh
+import pycolmap
 
 # Import VGGT model and preprocessing functions
 from vggt.models.vggt import VGGT
+from vggt.utils.load_fn import load_and_preprocess_images_square
+from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from vggt.utils.geometry import unproject_depth_map_to_point_map
+from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
+from vggt.dependency.track_predict import predict_tracks
+from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
 
 # Create output directory from environment or default to 'outputs'
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def preprocess_frame_for_vggt(frame_np, target_size=518):
-    """
-    Preprocess a single numpy frame for VGGT model input.
-    Based on load_and_preprocess_images from VGGT codebase.
-    
-    Args:
-        frame_np: numpy array of shape (H, W, 3) with values 0-255
-        target_size: target size for the longest dimension
-        
-    Returns:
-        torch.Tensor: preprocessed frame tensor of shape (3, H, W) normalized to [0,1]
-    """
-    # Convert numpy to PIL Image
-    img = Image.fromarray(frame_np.astype(np.uint8))
-    
-    # Convert to RGB if needed
-    img = img.convert("RGB")
-    
-    width, height = img.size
-    to_tensor = TF.ToTensor()
-    
-    # Make the largest dimension target_size while maintaining aspect ratio
-    if width >= height:
-        new_width = target_size
-        new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
-    else:
-        new_height = target_size
-        new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
-    
-    # Resize with new dimensions (width, height)
-    img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
-    img_tensor = to_tensor(img)  # Convert to tensor (0, 1)
-    
-    # Pad to make a square of target_size x target_size
-    h_padding = target_size - img_tensor.shape[1]
-    w_padding = target_size - img_tensor.shape[2]
-    
-    if h_padding > 0 or w_padding > 0:
-        pad_top = h_padding // 2
-        pad_bottom = h_padding - pad_top
-        pad_left = w_padding // 2
-        pad_right = w_padding - pad_left
-        
-        # Pad with white (value=1.0)
-        img_tensor = torch.nn.functional.pad(
-            img_tensor, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=1.0
-        )
-    
-    return img_tensor
-
 def load_vggt_model():
-    """Load the VGGT model."""
+    """Load the VGGT model using the same approach as colmap_demo.py."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
-    # model.eval()
+    model = VGGT()
+    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    model.eval()
+    model = model.to(device)
     return model
-
-def extract_colors_from_vggt_predictions(world_points, images, world_points_conf, conf_threshold=0.0001):
-    """
-    Extract RGB colors from input images corresponding to world points.
-    Based on the implementation in main.py.
-    
-    Args:
-        world_points: Tensor of shape (batch, frames, height, width, 3) - 3D world coordinates
-        images: Tensor of shape (batch, frames, 3, height, width) - input images  
-        world_points_conf: Tensor of shape (batch, frames, height, width) - confidence scores
-        conf_threshold: Float - minimum confidence threshold for valid points
-        
-    Returns:
-        valid_points: numpy array of valid 3D points
-        valid_colors: numpy array of corresponding RGB colors (0-255)
-        valid_conf: numpy array of corresponding confidence scores
-    """
-    # Convert to numpy and move to CPU
-    world_points_np = world_points.cpu().numpy()[0]  # Remove batch dimension: (frames, height, width, 3)
-    world_points_conf_np = world_points_conf.cpu().numpy()[0]  # (frames, height, width)
-    
-    # Convert images from (batch, frames, 3, H, W) to (frames, H, W, 3)
-    images_np = images.cpu().numpy()[0].transpose(0, 2, 3, 1)  # (frames, height, width, 3)
-    image_colors = (images_np * 255).astype(np.uint8)  # Convert to 0-255 range
-    
-    # Flatten all arrays
-    world_points_flat = world_points_np.reshape(-1, 3)
-    colors_flat = image_colors.reshape(-1, 3)
-    conf_flat = world_points_conf_np.reshape(-1) - 1
-    
-    # Apply confidence threshold
-    valid_mask = conf_flat > conf_threshold
-    
-    valid_points = world_points_flat[valid_mask]
-    valid_colors = colors_flat[valid_mask]
-    valid_conf = conf_flat[valid_mask]
-    
-    return valid_points, valid_colors, valid_conf
-
-def export_ply_with_colors(points, colors, filename=None, confidence=None):
-    """Export points with colors to a PLY file or return as bytes."""
-    ply_lines = []
-    ply_lines.append("ply\n")
-    ply_lines.append("format ascii 1.0\n")
-    ply_lines.append(f"element vertex {len(points)}\n")
-    ply_lines.append("property float x\n")
-    ply_lines.append("property float y\n")
-    ply_lines.append("property float z\n")
-    ply_lines.append("property uchar red\n")
-    ply_lines.append("property uchar green\n")
-    ply_lines.append("property uchar blue\n")
-    if confidence is not None:
-        ply_lines.append("property float confidence\n")
-    ply_lines.append("end_header\n")
-    
-    if confidence is not None:
-        for point, color, conf in zip(points, colors, confidence):
-            ply_lines.append(f"{point[0]} {point[1]} {point[2]} {color[0]} {color[1]} {color[2]} {conf}\n")
-    else:
-        for point, color in zip(points, colors):
-            ply_lines.append(f"{point[0]} {point[1]} {point[2]} {color[0]} {color[1]} {color[2]}\n")
-    
-    ply_content = ''.join(ply_lines)
-    
-    if filename:
-        with open(filename, 'w') as f:
-            f.write(ply_content)
-        return None
-    else:
-        return ply_content.encode('utf-8')
 
 # helper to upload per-frame data to S3
 def upload_frame_data(s3_client, bucket, video_name, idx, frame_np, depth, pose, trajectory):
@@ -228,6 +121,18 @@ def parse_args():
     p.add_argument("--frame-batch-size",  type=int, default=50,
                    help="Number of frames per batch to process")
     p.add_argument("--target-bucket", required=True, help="S3 bucket for uploads")
+    
+    # COLMAP reconstruction options
+    p.add_argument("--use-ba", action="store_true", default=True, help="Use BA for reconstruction")
+    p.add_argument("--max-reproj-error", type=float, default=8.0, help="Maximum reprojection error for reconstruction")
+    p.add_argument("--shared-camera", action="store_true", default=True, help="Use shared camera for all images")
+    p.add_argument("--camera-type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
+    p.add_argument("--vis-thresh", type=float, default=0.2, help="Visibility threshold for tracks")
+    p.add_argument("--query-frame-num", type=int, default=8, help="Number of frames to query")
+    p.add_argument("--max-query-pts", type=int, default=4096, help="Maximum number of query points")
+    p.add_argument("--fine-tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)")
+    p.add_argument("--conf-thres-value", type=float, default=5.0, help="Confidence threshold value for depth filtering (wo BA)")
+    
     return p.parse_args()
 
 def list_video_keys(s3, bucket, prefix, ext):
@@ -291,80 +196,181 @@ def get_fps(url):
     fps = float(num) / float(den)
     return fps
 
-def process_batch(model, frames, batch_index, video_name, s3_client, target_bucket):
+def process_batch(model, frames, batch_index, video_name, s3_client, target_bucket, args):
     """
-    Process a batch of frames using VGGT model.
+    Process a batch of frames using VGGT model for COLMAP reconstruction.
     `frames` is a list/array of shape [batch_size, H, W, C]
     """
     print(f"    → processing batch {batch_index} ({len(frames)} frames) of {video_name}")
     
     device = next(model.parameters()).device
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    # dtype = torch.float16  # Use float32 for better precision in reconstruction
     
-    # Preprocess frames for VGGT
-    preprocessed_frames = []
-    for frame in frames:
-        preprocessed_frame = preprocess_frame_for_vggt(frame)
-        preprocessed_frames.append(preprocessed_frame)
+    images = frames.to(device)  # Move frames to the same device as the model
+    # Load images and get original coordinates (similar to colmap_demo.py)
+    # For streaming, we'll use the current frame dimensions
+    original_height, original_width = frames[0].shape[:2]
     
-    # Stack into batch tensor
-    images = torch.stack(preprocessed_frames).to(device)  # Shape: (N, 3, H, W)
-    images = images.unsqueeze(0)  # Add batch dimension: (1, N, 3, H, W)
+    # Create original_coords tensor to match colmap_demo format
+    # This represents the crop/padding info, but for streaming we use the full frame
+    original_coords = torch.zeros((len(frames), 4), device=device)
+    original_coords[:, 2] = original_width   # width
+    original_coords[:, 3] = original_height  # height
     
-    # Run VGGT inference
-    ply_bytes = None
+    # VGGT fixed resolution and image load resolution
+    vggt_fixed_resolution = 518
+    img_load_resolution = max(original_width, original_height)
+    
     try:
-        with torch.no_grad():
+        # Run VGGT to estimate camera and depth
+        extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+        points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+        
+        print(f"Generated depth maps for batch {batch_index}")
+        print(f"Depth map shape: {depth_map.shape}")
+        print(f"Points 3D shape: {points_3d.shape}")
+        
+        # Create base image path list for this batch
+        base_image_path_list = [f"frame_{batch_index:03d}_{i:03d}.png" for i in range(len(frames))]
+        
+        if args.use_ba:
+            # Use Bundle Adjustment approach
+            # Prepare square images for predict_tracks using colmap preprocessing
+            load_res = min(518, max(original_width, original_height))
+            images_square = square_and_resize(images, load_res)
+                
+            image_size = np.array(images_square.shape[-2:])
+            print(f"Image size for BA: {image_size}")
+            scale = img_load_resolution / vggt_fixed_resolution
+            shared_camera = args.shared_camera
+
             with torch.cuda.amp.autocast(dtype=dtype):
-                predictions = model(images)
-                print("Prediction keys:", list(predictions.keys()))
-                # Extract world points and colors
-                world_points = predictions["world_points"]
-                world_points_conf = predictions["world_points_conf"] 
-                
-                # Extract colored point cloud
-                valid_points, valid_colors, valid_conf = extract_colors_from_vggt_predictions(
-                    world_points, images, world_points_conf, conf_threshold=0.0001
+                # Predicting Tracks
+                pred_tracks, pred_vis_scores, pred_confs, points_3d, points_rgb = predict_tracks(
+                    images_square,
+                    conf=depth_conf,
+                    points_3d=points_3d,
+                    masks=None,
+                    max_query_pts=args.max_query_pts,
+                    query_frame_num=args.query_frame_num,
+                    keypoint_extractor="aliked+sp",
+                    fine_tracking=args.fine_tracking,
                 )
-                
-                if len(valid_points) > 0:
-                    ply_bytes = export_ply_with_colors(valid_points, valid_colors, confidence=valid_conf)
-                    print(f"Generated {len(valid_points)} colored points for batch {batch_index}")
-                else:
-                    print(f"Warning: No valid points generated for batch {batch_index}")
-                    
+
+                torch.cuda.empty_cache()
+
+            # rescale the intrinsic matrix from 518 to img_load_resolution
+            intrinsic[:, :2, :] *= scale
+            track_mask = pred_vis_scores > args.vis_thresh
+
+            reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
+                points_3d,
+                extrinsic,
+                intrinsic,
+                pred_tracks,
+                image_size,
+                masks=track_mask,
+                max_reproj_error=args.max_reproj_error,
+                shared_camera=shared_camera,
+                camera_type=args.camera_type,
+                points_rgb=points_rgb,
+            )
+
+            if reconstruction is None:
+                print(f"Warning: No reconstruction could be built with BA for batch {batch_index}")
+                return
+
+            # Bundle Adjustment
+            ba_options = pycolmap.BundleAdjustmentOptions()
+            pycolmap.bundle_adjustment(reconstruction, ba_options)
+
+            reconstruction_resolution = img_load_resolution
+
+        else:
+            # Use feedforward approach without BA
+            conf_thres_value = args.conf_thres_value
+            max_points_for_colmap = 200000
+            shared_camera = False
+            camera_type = "PINHOLE"
+
+            image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
+            num_frames, height, width, _ = points_3d.shape
+
+            points_rgb = F.interpolate(
+                images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
+            )
+            points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
+            points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+            # (S, H, W, 3), with x, y coordinates and frame indices
+            points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+
+            conf_mask = depth_conf >= conf_thres_value
+            # at most writing max_points_for_colmap 3d points to colmap reconstruction object
+            conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+            print(f"Points passing confidence threshold: {conf_mask.sum()}")
+            print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+
+            points_3d = points_3d[conf_mask]
+            points_xyf = points_xyf[conf_mask]
+            points_rgb = points_rgb[conf_mask]
+
+            reconstruction = batch_np_matrix_to_pycolmap_wo_track(
+                points_3d,
+                points_xyf,
+                points_rgb,
+                extrinsic,
+                intrinsic,
+                image_size,
+                shared_camera=shared_camera,
+                camera_type=camera_type,
+            )
+
+            reconstruction_resolution = vggt_fixed_resolution
+
+        # Rename and rescale camera parameters
+        reconstruction = rename_colmap_recons_and_rescale_camera(
+            reconstruction,
+            base_image_path_list,
+            original_coords.cpu().numpy(),
+            img_size=reconstruction_resolution,
+            shift_point2d_to_original_res=False,
+            shared_camera=shared_camera if args.use_ba else False,
+        )
+
+        # Save reconstruction files for this batch
+        sparse_dir = os.path.join(OUTPUT_DIR, f"{video_name}_batch_{batch_index}_sparse")
+        os.makedirs(sparse_dir, exist_ok=True)
+        reconstruction.write(sparse_dir)
+        
+        # Extract points for PLY export
+        points_list = []
+        colors_list = []
+        for point3D in reconstruction.points3D.values():
+            points_list.append(point3D.xyz)
+            colors_list.append(point3D.color)
+        
+        if len(points_list) > 0:
+            points_array = np.array(points_list)
+            colors_array = np.array(colors_list)
+            
+            # Save point cloud
+            ply_path = os.path.join(sparse_dir, "points.ply")
+            trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
+            
+            print(f"Saved COLMAP reconstruction for batch {batch_index} to {sparse_dir}")
+            print(f"Generated {len(points_list)} 3D points")
+        else:
+            print(f"Warning: No valid 3D points generated for batch {batch_index}")
+            
     except Exception as e:
         print(f"Error processing batch {batch_index}: {e}")
-    
-    # Only upload if we successfully generated PLY data
-    if ply_bytes:
-        # upload colored point cloud as tensor to S3
-        # s3_key = f"{video_name}/batch_{batch_index}_pointcloud.ply"
-        # s3_client.put_object(Bucket=target_bucket, Key=s3_key, Body=ply_bytes)
-        # print(f"Uploaded batch {batch_index} pointcloud to s3://{target_bucket}/{s3_key}")
+        import traceback
+        traceback.print_exc()
 
-        # write to local file for debugging
-        local_path = os.path.join(OUTPUT_DIR, f"{video_name}_batch_{batch_index}_pointcloud.ply")
-        with open(local_path, 'wb') as f:
-            f.write(ply_bytes)
-        print(f"Saved batch {batch_index} pointcloud to {local_path}")
-    else:
-        print(f"Warning: No PLY data generated for batch {batch_index}")
-
-    # upload each frame's data
-    # compute global frame index offset by start_idx
-    # base_idx = start_idx + batch_index * len(frames)
-    # for i, frame in tqdm(enumerate(frames), desc=f"Batch {batch_index+1}/{total_batches}", unit="frame"):
-    # # for i, frame in enumerate(frames):
-    #     global_idx = base_idx + i
-    #     depth = results.get('depths')[i]
-    #     proj = results.get('projection_matrix')
-    #     # extract 3x3 pose
-    #     pose = torch.from_numpy(proj)[:3, :3] if isinstance(proj, np.ndarray) else proj[:3, :3]
-    #     traj = results.get('trajectory')[i]
-    #     upload_frame_data(s3_client, target_bucket, video_name, global_idx, frame, depth, pose, traj)
-
-def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
+def process_streaming_video(model, url, batch_size, s3_client, target_bucket, args):
     """
     Stream from `url` via ffmpeg, accumulate `batch_size` frames, then process each batch.
     """
@@ -423,7 +429,7 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
     # initialize batch and batch counter
     batch = []
     batch_idx = 0
-    frame_count = 50
+    frame_count = 5
     idx = 0
 
     # read frames
@@ -433,11 +439,17 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
         if not in_bytes or len(in_bytes) < frame_size:
             break
 
+        buffer_copy = in_bytes[:]
         # turn bytes into H×W×3 uint8 numpy array
+        # Convert frames to proper format for VGGT
+        # frames are numpy arrays of shape (H, W, 3) with values 0-255
+        # Convert to tensors and normalize to [0, 1]
         frame = (
-            np
-            .frombuffer(in_bytes, np.uint8)
+            torch
+            .frombuffer(buffer_copy, dtype=torch.uint8)
             .reshape((height, width, 3))
+            .permute(2, 0, 1) # Convert to (3, H, W)
+            .float() / 255.0
         )
 
         if idx < frame_count:
@@ -446,8 +458,9 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
             continue
 
         batch.append(frame)
-        if len(batch) >= batch_size:
-            process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket)
+        if len(batch) >= batch_size:            
+            batch_tensor = torch.stack(batch) # Shape: (N, 3, H, W)
+            process_batch(model, batch_tensor, batch_idx, video_name, s3_client, target_bucket, args)
             batch = []
             batch_idx += 1
             idx = 0
@@ -455,7 +468,7 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
 
     # final partial batch
     if batch:
-        process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket)
+        process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket, args)
 
     process.wait()
 
@@ -470,6 +483,115 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket):
     else:
         print(f"   done {video_name}")
 
+
+def run_VGGT(model, images, dtype, resolution=518):
+    """
+    Run VGGT model to get extrinsic, intrinsic matrices and depth maps.
+    From colmap_demo.py
+    """
+    # images: [B, 3, H, W]
+    assert len(images.shape) == 4
+    assert images.shape[1] == 3
+
+    # hard-coded to use 518 for VGGT
+    images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
+
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(dtype=dtype):
+            images = images[None]  # add batch dimension
+            aggregated_tokens_list, ps_idx = model.aggregator(images)
+
+        # Predict Cameras
+        pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+        # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
+        # Predict Depth Maps
+        depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
+
+    extrinsic = extrinsic.squeeze(0).cpu().numpy()
+    intrinsic = intrinsic.squeeze(0).cpu().numpy()
+    depth_map = depth_map.squeeze(0).cpu().numpy()
+    depth_conf = depth_conf.squeeze(0).cpu().numpy()
+    return extrinsic, intrinsic, depth_map, depth_conf
+
+def rename_colmap_recons_and_rescale_camera(
+    reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
+):
+    """
+    Rename images and rescale camera parameters to match original image dimensions.
+    From colmap_demo.py
+    """
+    rescale_camera = True
+
+    for pyimageid in reconstruction.images:
+        # Reshaped the padded&resized image to the original size
+        # Rename the images to the original names
+        pyimage = reconstruction.images[pyimageid]
+        pycamera = reconstruction.cameras[pyimage.camera_id]
+        pyimage.name = image_paths[pyimageid - 1]
+
+        if rescale_camera:
+            # Rescale the camera parameters
+            pred_params = copy.deepcopy(pycamera.params)
+
+            real_image_size = original_coords[pyimageid - 1, -2:]
+            resize_ratio = max(real_image_size) / img_size
+            pred_params = pred_params * resize_ratio
+            real_pp = real_image_size / 2
+            pred_params[-2:] = real_pp  # center of the image
+
+            pycamera.params = pred_params
+            pycamera.width = real_image_size[0]
+            pycamera.height = real_image_size[1]
+
+        if shift_point2d_to_original_res:
+            # Also shift the point2D to original resolution
+            top_left = original_coords[pyimageid - 1, :2]
+
+            for point2D in pyimage.points2D:
+                point2D.xy = (point2D.xy - top_left) * resize_ratio
+
+        if shared_camera:
+            # If shared_camera, all images share the same camera
+            # no need to rescale any more
+            rescale_camera = False
+
+    return reconstruction
+
+def square_and_resize(images: torch.Tensor, load_res: int) -> torch.Tensor:
+    """
+    Resize and pad images to square of size (load_res, load_res).
+    Images are tensors of shape (N, 3, H, W) with values in [0,1].
+    """
+    square_images = []
+    for img in images:
+        c, h, w = img.shape
+        # scale to keep aspect ratio
+        if h >= w:
+            new_h = load_res
+            new_w = max(1, int(w * load_res / h))
+        else:
+            new_w = load_res
+            new_h = max(1, int(h * load_res / w))
+        # make dimensions divisible by 14
+        new_h = (new_h // 14) * 14
+        new_w = (new_w // 14) * 14
+        img_resized = F.interpolate(
+            img.unsqueeze(0), size=(new_h, new_w), mode="bilinear", align_corners=False
+        ).squeeze(0)
+        # pad to square
+        pad_top = (load_res - new_h) // 2
+        pad_bottom = load_res - new_h - pad_top
+        pad_left = (load_res - new_w) // 2
+        pad_right = load_res - new_w - pad_left
+        img_padded = F.pad(
+            img_resized,
+            (pad_left, pad_right, pad_top, pad_bottom),
+            mode="constant",
+            value=1.0,
+        )
+        square_images.append(img_padded)
+    return torch.stack(square_images)
 
 def main():
     args = parse_args()
@@ -503,14 +625,26 @@ def main():
     model = load_vggt_model()
 
     if model is None:
-        print("Failed to load AnyCam model. Exiting.")
+        print("Failed to load VGGT model. Exiting.")
         return
+
+    # Print configuration
+    print("COLMAP Reconstruction Configuration:")
+    print(f"  Use Bundle Adjustment: {args.use_ba}")
+    print(f"  Max Reprojection Error: {args.max_reproj_error}")
+    print(f"  Shared Camera: {args.shared_camera}")
+    print(f"  Camera Type: {args.camera_type}")
+    print(f"  Visibility Threshold: {args.vis_thresh}")
+    print(f"  Query Frame Number: {args.query_frame_num}")
+    print(f"  Max Query Points: {args.max_query_pts}")
+    print(f"  Fine Tracking: {args.fine_tracking}")
+    print(f"  Confidence Threshold: {args.conf_thres_value}")
 
     # Stream & batch-process each
     for key in tqdm(keys[2:], desc="Videos", unit="video"):
         url = get_presigned_url(s3, args.bucket, key)
         process_streaming_video(model, url, batch_size=args.frame_batch_size,
-                                s3_client=s3, target_bucket=args.target_bucket)
+                                s3_client=s3, target_bucket=args.target_bucket, args=args)
 
 if __name__ == "__main__":
     start = time.time()

@@ -3,3 +3,5 @@ uv run streaming_vggt.py --bucket cod-yt-playlist --ext mp4 --frame-batch-size 5
 uv run batch_colmap_demo.py --conf_thres_value 1.2 --scene_dir cod-output/ --max_frames 1000
 
 (base) sky@sky-b860-root-1f34085b-head:~/sky_workdir/spmem$ scp -r ^Cky-b860-root:/home/sky/sky_workdir/spmem/testdata/images
+
+uv run python gsplat_trainer.py default     --data_dir cod-output/sparse/ --data_factor 4     --result_dir ./results/garden

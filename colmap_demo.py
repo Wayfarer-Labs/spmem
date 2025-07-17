@@ -43,16 +43,16 @@ def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--use_ba", action="store_true", default=True, help="Use BA for reconstruction")
+    parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
     ######### BA parameters #########
     parser.add_argument(
         "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
     )
-    parser.add_argument("--shared_camera", action="store_true", default=True, help="Use shared camera for all images")
+    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
     parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
     parser.add_argument("--query_frame_num", type=int, default=8, help="Number of frames to query")
-    parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
+    parser.add_argument("--max_query_pts", type=int, default=512, help="Maximum number of query points")
     parser.add_argument(
         "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
     )
@@ -74,14 +74,16 @@ def run_VGGT(model, images, dtype, resolution=518):
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             images = images[None]  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images)
+            print(f"Input images shape: {images.shape}")
+            print(f"size of images: {images.size()}")
+            aggregated_tokens_list, ps_idx = model.aggregator(images )
 
         # Predict Cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
         # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
         extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
         # Predict Depth Maps
-        depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
+        depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx, frames_chunk_size=1)
 
     extrinsic = extrinsic.squeeze(0).cpu().numpy()
     intrinsic = intrinsic.squeeze(0).cpu().numpy()
@@ -105,6 +107,7 @@ def demo_fn(args):
 
     # Set device and dtype
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    dtype = torch.float16
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     print(f"Using dtype: {dtype}")
@@ -119,7 +122,7 @@ def demo_fn(args):
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    image_path_list = glob.glob(os.path.join(image_dir, "*"))[::20][:50]
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
