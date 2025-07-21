@@ -72,7 +72,7 @@ def run_VGGT(model, images, dtype, resolution=518):
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
+        with torch.amp.autocast(device_type="cuda", dtype=dtype):
             images = images[None]  # add batch dimension
             print(f"Input images shape: {images.shape}")
             print(f"size of images: {images.size()}")
@@ -107,22 +107,26 @@ def demo_fn(args):
 
     # Set device and dtype
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    dtype = torch.float16
+    # dtype = torch.float16
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     print(f"Using dtype: {dtype}")
 
     # Run VGGT for camera and depth estimation
     model = VGGT()
+
     _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    model = torch.compile(model, backend="inductor", fullgraph=True)
+
     model.eval()
     model = model.to(device)
     print(f"Model loaded")
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    image_path_list = glob.glob(os.path.join(image_dir, "*"))[::15][:40]
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
@@ -154,7 +158,7 @@ def demo_fn(args):
         scale = img_load_resolution / vggt_fixed_resolution
         shared_camera = args.shared_camera
 
-        with torch.cuda.amp.autocast(dtype=dtype):
+        with torch.amp.autocast(device_type="cuda", dtype=dtype):
             # Predicting Tracks
             # Using VGGSfM tracker instead of VGGT tracker for efficiency
             # VGGT tracker requires multiple backbone runs to query different frames (this is a problem caused by the training process)
