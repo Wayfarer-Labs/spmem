@@ -698,7 +698,7 @@ def main():
 
     model = load_vggt_model()
     dinov2_model = get_dinov2_model()
-    vggsfm_tracker_model = build_vggsfm_tracker().cuda()
+    vggsfm_tracker_model = torch.compile(build_vggsfm_tracker()).cuda()
 
     if model is None:
         print("Failed to load VGGT model. Exiting.")
