@@ -63,7 +63,12 @@ from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
 from vggt.dependency.track_predict import predict_tracks
+from vggt.dependency.vggsfm_utils import build_vggsfm_tracker
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
+
+
+predict_tracks = torch.compile(predict_tracks)
+
 
 # Create output directory from environment or default to 'outputs'
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "outputs")
@@ -196,7 +201,16 @@ def get_fps(url):
     fps = float(num) / float(den)
     return fps
 
-def process_batch(model, frames, batch_index, video_name, s3_client, target_bucket, args):
+
+def get_dinov2_model(model_name="dinov2_vitb14_reg", device="cuda"):
+    dino_v2_model = torch.hub.load("facebookresearch/dinov2", model_name)
+    dino_v2_model.eval()
+    dino_v2_model = dino_v2_model.to(device)
+    return dino_v2_model
+
+
+@torch.no_grad()
+def process_batch(model, dinov2_model, vggsfm_tracker_model, frames, batch_index, video_name, s3_client, target_bucket, args):
     """
     Process a batch of frames using VGGT model for COLMAP reconstruction.
     `frames` is a list/array of shape [batch_size, H, W, C]
@@ -224,9 +238,8 @@ def process_batch(model, frames, batch_index, video_name, s3_client, target_buck
     
     try:
         # Run VGGT to estimate camera and depth
-        extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
-        points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
-        
+        extrinsic, intrinsic, depth_map, depth_conf, points_3d = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+
         print(f"Generated depth maps for batch {batch_index}")
         print(f"Depth map shape: {depth_map.shape}")
         print(f"Points 3D shape: {points_3d.shape}")
@@ -245,9 +258,12 @@ def process_batch(model, frames, batch_index, video_name, s3_client, target_buck
             scale = img_load_resolution / vggt_fixed_resolution
             shared_camera = args.shared_camera
 
-            with torch.cuda.amp.autocast(dtype=dtype):
+            images_square = images_square.cuda()
+            with torch.amp.autocast("cuda", dtype=dtype):
                 # Predicting Tracks
                 pred_tracks, pred_vis_scores, pred_confs, points_3d, points_rgb = predict_tracks(
+                    dinov2_model,
+                    vggsfm_tracker_model,
                     images_square,
                     conf=depth_conf,
                     points_3d=points_3d,
@@ -370,7 +386,7 @@ def process_batch(model, frames, batch_index, video_name, s3_client, target_buck
         import traceback
         traceback.print_exc()
 
-def process_streaming_video(model, url, batch_size, s3_client, target_bucket, args):
+def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batch_size, s3_client, target_bucket, args):
     """
     Stream from `url` via ffmpeg, accumulate `batch_size` frames, then process each batch.
     """
@@ -458,9 +474,9 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket, ar
             continue
 
         batch.append(frame)
-        if len(batch) >= batch_size:            
+        if len(batch) >= batch_size:
             batch_tensor = torch.stack(batch) # Shape: (N, 3, H, W)
-            process_batch(model, batch_tensor, batch_idx, video_name, s3_client, target_bucket, args)
+            process_batch(model, dinov2_model, vggsfm_tracker_model, batch_tensor, batch_idx, video_name, s3_client, target_bucket, args)
             batch = []
             batch_idx += 1
             idx = 0
@@ -468,7 +484,7 @@ def process_streaming_video(model, url, batch_size, s3_client, target_bucket, ar
 
     # final partial batch
     if batch:
-        process_batch(model, batch, batch_idx, video_name, s3_client, target_bucket, args)
+        process_batch(model, dinov2_model, batch, batch_idx, video_name, s3_client, target_bucket, args)
 
     process.wait()
 
@@ -497,22 +513,80 @@ def run_VGGT(model, images, dtype, resolution=518):
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
-            images = images[None]  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images)
+        with torch.amp.autocast("cuda", dtype=dtype):
+            extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd(model, images)
 
-        # Predict Cameras
-        pose_enc = model.camera_head(aggregated_tokens_list)[-1]
-        # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-        # Predict Depth Maps
-        depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
+    return extrinsic, intrinsic, depth_map, depth_conf, points_3d
 
-    extrinsic = extrinsic.squeeze(0).cpu().numpy()
-    intrinsic = intrinsic.squeeze(0).cpu().numpy()
-    depth_map = depth_map.squeeze(0).cpu().numpy()
-    depth_conf = depth_conf.squeeze(0).cpu().numpy()
-    return extrinsic, intrinsic, depth_map, depth_conf
+
+def torch_experimental_unproject_depth_map_to_point_map(
+    depth_map: torch.Tensor,          # (S,H,W[,1])
+    extrinsics_cam: torch.Tensor,     # (S,3,4) : camera ← world   [R | t]
+    intrinsics_cam: torch.Tensor,     # (S,3,3)
+) -> torch.Tensor:                    # ⟼ (S,H,W,3)   world coords
+    assert torch.is_tensor(depth_map)  and depth_map.is_cuda
+    assert torch.is_tensor(extrinsics_cam) and extrinsics_cam.is_cuda
+    assert torch.is_tensor(intrinsics_cam) and intrinsics_cam.is_cuda
+    assert extrinsics_cam.shape[-2:] == (3, 4)
+    assert intrinsics_cam.shape[-2:] == (3, 3)
+
+    # ------------ reshape / constants --------------------------------------
+    if depth_map.ndim == 4 and depth_map.shape[-1] == 1:          # (S,H,W,1) → (S,H,W)
+        depth_map = depth_map.squeeze(-1)
+
+    S, H, W = depth_map.shape
+    device, dtype = depth_map.device, depth_map.dtype
+
+    # ------------ pixel grid (homogeneous) ---------------------------------
+    ys, xs = torch.meshgrid(
+        torch.arange(H, device=device, dtype=dtype),
+        torch.arange(W, device=device, dtype=dtype),
+        indexing="ij",
+    )                                        # each (H,W)
+    pix_h = torch.stack((xs, ys, torch.ones_like(xs)))   # (3,H,W)
+    pix_h = pix_h.unsqueeze(0).expand(S, -1, -1, -1)     # (S,3,H,W)
+
+    # ------------ camera ray directions ------------------------------------
+    K_inv   = torch.linalg.inv(intrinsics_cam)           # (S,3,3)
+    rays    = torch.einsum("bij,bjhw->bihw", K_inv, pix_h)   # (S,3,H,W)
+
+    pts_cam = rays * depth_map.unsqueeze(1)              # (S,3,H,W)
+
+    # ------------ camera → world -------------------------------------------
+    R = extrinsics_cam[..., :3]                          # (S,3,3)
+    t = extrinsics_cam[..., 3:].unsqueeze(-1)            # (S,3,1,1)
+
+    pts_world = torch.einsum("bij,bjhw->bihw", R.transpose(1, 2), pts_cam - t)
+
+    return pts_world.permute(0, 2, 3, 1)                 # (S,H,W,3)
+
+
+@torch.compile
+def fwd(model, images):
+    images = images[None]  # add batch dimension
+    aggregated_tokens_list, ps_idx = model.aggregator(images)
+
+    # Predict Cameras
+    pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+    # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
+    extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
+    # Predict Depth Maps
+    depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
+
+    extrinsic = extrinsic.squeeze(0)
+    intrinsic = intrinsic.squeeze(0)
+    depth_map = depth_map.squeeze(0)
+    depth_conf = depth_conf.squeeze(0)
+
+    # numpy based, reference implementation
+    extrinsic, intrinsic, depth_map, depth_conf = [x.cpu().numpy() for x in [extrinsic, intrinsic, depth_map, depth_conf]]
+    points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # experimental gpu implementation
+    # points_3d = torch_experimental_unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    return extrinsic, intrinsic, depth_map, depth_conf, points_3d
+
 
 def rename_colmap_recons_and_rescale_camera(
     reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
@@ -623,6 +697,8 @@ def main():
         return
 
     model = load_vggt_model()
+    dinov2_model = get_dinov2_model()
+    vggsfm_tracker_model = torch.compile(build_vggsfm_tracker()).cuda()
 
     if model is None:
         print("Failed to load VGGT model. Exiting.")
@@ -643,7 +719,7 @@ def main():
     # Stream & batch-process each
     for key in tqdm(keys[2:], desc="Videos", unit="video"):
         url = get_presigned_url(s3, args.bucket, key)
-        process_streaming_video(model, url, batch_size=args.frame_batch_size,
+        process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batch_size=args.frame_batch_size,
                                 s3_client=s3, target_bucket=args.target_bucket, args=args)
 
 if __name__ == "__main__":
