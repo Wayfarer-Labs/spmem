@@ -1,7 +1,3 @@
-# Production Dockerfile for VGGT-based processing project
-# Use the official PyTorch image with CUDA support
-# FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
-# FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 ENV CUDA_HOME=/usr/local/cuda
