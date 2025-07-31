@@ -455,7 +455,8 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
         if not in_bytes or len(in_bytes) < frame_size:
             break
 
-        buffer_copy = in_bytes[:]
+        buffer_copy = bytearray(in_bytes)  # or bytes(in_bytes)
+
         # turn bytes into H×W×3 uint8 numpy array
         # Convert frames to proper format for VGGT
         # frames are numpy arrays of shape (H, W, 3) with values 0-255
@@ -479,12 +480,11 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
             process_batch(model, dinov2_model, vggsfm_tracker_model, batch_tensor, batch_idx, video_name, s3_client, target_bucket, args)
             batch = []
             batch_idx += 1
-            idx = 0
-            
+            idx = 0            
 
     # final partial batch
     if batch:
-        process_batch(model, dinov2_model, batch, batch_idx, video_name, s3_client, target_bucket, args)
+        process_batch(model, dinov2_model, vggsfm_tracker_model, batch, batch_idx, video_name, s3_client, target_bucket, args)
 
     process.wait()
 
