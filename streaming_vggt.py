@@ -78,10 +78,10 @@ def load_vggt_model():
     """Load the VGGT model using the same approach as colmap_demo.py."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = VGGT()
+    model = model.to(device)
     _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
     model.eval()
-    model = model.to(device)
     return model
 
 # helper to upload per-frame data to S3
@@ -128,7 +128,7 @@ def parse_args():
     p.add_argument("--target-bucket", required=True, help="S3 bucket for uploads")
     
     # COLMAP reconstruction options
-    p.add_argument("--use-ba", action="store_true", default=True, help="Use BA for reconstruction")
+    p.add_argument("--use-ba", action="store_true", default=False, help="Use BA for reconstruction")
     p.add_argument("--max-reproj-error", type=float, default=8.0, help="Maximum reprojection error for reconstruction")
     p.add_argument("--shared-camera", action="store_true", default=True, help="Use shared camera for all images")
     p.add_argument("--camera-type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
@@ -148,7 +148,7 @@ def list_video_keys(s3, bucket, prefix, ext):
             key = obj["Key"]
             if key.lower().endswith(f".{ext.lower()}"):
                 keys.append(key)
-    return keys
+    return sorted(keys)
 
 def get_presigned_url(s3, bucket, key, expires=3600):
     return s3.generate_presigned_url(
@@ -421,8 +421,8 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
         print("Batch count unavailable (nb_frames missing)")
 
     fps = get_fps(url)
-    # start_seconds = start_idx / fps
-    start_seconds = 50
+    start_seconds = start_idx / fps
+    # start_seconds = 50
 
     # 2) Launch ffmpeg as a subprocess, outputting rawvideo RGB24 to stdout
 
