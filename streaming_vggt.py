@@ -445,7 +445,7 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
     # initialize batch and batch counter
     batch = []
     batch_idx = 0
-    frame_count = 5
+    frame_skip_count = 5
     idx = 0
 
     # read frames
@@ -469,7 +469,7 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
             .float() / 255.0
         )
 
-        if idx < frame_count:
+        if idx < frame_skip_count:
             idx += 1
             print(".", end="", flush=True)
             continue
@@ -480,7 +480,8 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
             process_batch(model, dinov2_model, vggsfm_tracker_model, batch_tensor, batch_idx, video_name, s3_client, target_bucket, args)
             batch = []
             batch_idx += 1
-            idx = 0            
+            idx = 0
+            break
 
     # final partial batch
     if batch:
@@ -499,7 +500,7 @@ def process_streaming_video(model, dinov2_model, vggsfm_tracker_model, url, batc
     else:
         print(f"   done {video_name}")
 
-
+@torch.no_grad
 def run_VGGT(model, images, dtype, resolution=518):
     """
     Run VGGT model to get extrinsic, intrinsic matrices and depth maps.
@@ -512,9 +513,8 @@ def run_VGGT(model, images, dtype, resolution=518):
     # hard-coded to use 518 for VGGT
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
 
-    with torch.no_grad():
-        with torch.amp.autocast("cuda", dtype=dtype):
-            extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd(model, images)
+    with torch.amp.autocast("cuda", dtype=dtype):
+        extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd(model, images)
 
     return extrinsic, intrinsic, depth_map, depth_conf, points_3d
 
