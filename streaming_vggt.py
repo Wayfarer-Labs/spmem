@@ -514,7 +514,7 @@ def run_VGGT(model, images, dtype, resolution=518):
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
 
     with torch.amp.autocast("cuda", dtype=dtype):
-        extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd(model, images)
+        extrinsic, intrinsic, depth_map, depth_conf, points_3d = vggt_fwd(model, images)
 
     return extrinsic, intrinsic, depth_map, depth_conf, points_3d
 
@@ -562,7 +562,7 @@ def torch_experimental_unproject_depth_map_to_point_map(
 
 
 @torch.compile
-def fwd(model, images):
+def vggt_fwd(model, images):
     images = images[None]  # add batch dimension
     aggregated_tokens_list, ps_idx = model.aggregator(images)
 

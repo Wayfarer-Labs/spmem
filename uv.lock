@@ -2249,7 +2249,7 @@ wheels = [
 [[package]]
 name = "vggt"
 version = "0.0.1"
-source = { git = "https://github.com/facebookresearch/vggt.git#350fa2b4e8c24da5f68a97423cd83577ac4e34cf" }
+source = { git = "https://github.com/lapp0/vggt.git#804316f07aff0e70d1d6d0b2ff22d78eb044024c" }
 dependencies = [
     { name = "einops" },
     { name = "huggingface-hub" },
@@ -2298,7 +2298,7 @@ requires-dist = [
     { name = "torchvision" },
     { name = "trimesh", specifier = ">=4.7.0" },
     { name = "tyro", specifier = ">=0.9.26" },
-    { name = "vggt", git = "https://github.com/facebookresearch/vggt.git" },
+    { name = "vggt", git = "https://github.com/lapp0/vggt.git" },
     { name = "viser", specifier = ">=1.0.0" },
 ]
 
