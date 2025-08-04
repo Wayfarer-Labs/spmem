@@ -163,6 +163,24 @@ def load_vggt_models():
     
     return vggt_model, dinov2_model, vggsfm_tracker_model
 
+def run_VGGT(model, images, dtype, resolution=518):
+    """
+    Run VGGT model to get extrinsic, intrinsic matrices and depth maps.
+    From colmap_demo.py
+    """
+    # images: [B, 3, H, W]
+    assert len(images.shape) == 4
+    assert images.shape[1] == 3
+
+    # hard-coded to use 518 for VGGT
+    images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
+
+    with torch.no_grad():
+        with torch.amp.autocast("cuda", dtype=dtype):
+            extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd_vggt(model, images)
+
+    return extrinsic, intrinsic, depth_map, depth_conf, points_3d
+
 @torch.compile
 def fwd_vggt(model, images):
     """Forward pass through VGGT model."""
@@ -171,8 +189,8 @@ def fwd_vggt(model, images):
 
     # Predict Cameras
     pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+    # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
     extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-    
     # Predict Depth Maps
     depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
 
@@ -181,11 +199,12 @@ def fwd_vggt(model, images):
     depth_map = depth_map.squeeze(0)
     depth_conf = depth_conf.squeeze(0)
 
-    # Convert to numpy for processing
-    extrinsic, intrinsic, depth_map, depth_conf = [
-        x.cpu().numpy() for x in [extrinsic, intrinsic, depth_map, depth_conf]
-    ]
+    # numpy based, reference implementation
+    extrinsic, intrinsic, depth_map, depth_conf = [x.cpu().numpy() for x in [extrinsic, intrinsic, depth_map, depth_conf]]
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # experimental gpu implementation
+    # points_3d = torch_experimental_unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     return extrinsic, intrinsic, depth_map, depth_conf, points_3d
 
@@ -285,15 +304,11 @@ def process_window(
     original_coords[:, 3] = h  # height
     
     # VGGT processing
-    vggt_resolution = 518
+    vggt_fixed_resolution = 518
     img_load_resolution = max(w, h)
     
-    # Resize for VGGT
-    frames_resized = F.interpolate(frames, size=(vggt_resolution, vggt_resolution), 
-                                  mode="bilinear", align_corners=False)
-    
-    # Run VGGT
-    extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd_vggt(vggt_model, frames_resized)
+    # Run VGGT to estimate camera and depth
+    extrinsic, intrinsic, depth_map, depth_conf, points_3d = run_VGGT(vggt_model, frames, dtype, vggt_fixed_resolution)
     
     # Extract focal frame data
     focal_rgb = frames[focal_idx]  # Original resolution
@@ -313,7 +328,7 @@ def process_window(
         load_res = min(518, img_load_resolution)
         images_square = square_and_resize(frames, load_res)
         image_size = np.array(images_square.shape[-2:])
-        scale = img_load_resolution / vggt_resolution
+        scale = img_load_resolution / vggt_fixed_resolution
         
         images_square = images_square.cuda()
         with torch.amp.autocast("cuda", dtype=dtype):
@@ -366,12 +381,12 @@ def process_window(
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 200000
         
-        image_size = np.array([vggt_resolution, vggt_resolution])
+        image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
         num_frames, height, width, _ = points_3d.shape
         
         # Get RGB colors for points
         points_rgb = F.interpolate(
-            frames, size=(vggt_resolution, vggt_resolution), mode="bilinear", align_corners=False
+            frames, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
         )
         points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
         points_rgb = points_rgb.transpose(0, 2, 3, 1)
@@ -398,7 +413,22 @@ def process_window(
             camera_type="PINHOLE",
         )
         
-        reconstruction_resolution = vggt_resolution
+        reconstruction_resolution = vggt_fixed_resolution
+    
+    # Always rename and rescale camera parameters after reconstruction
+    if reconstruction is not None:
+        # Create base image path list
+        base_image_path_list = [f"frame_{i:03d}.png" for i in range(batch_size)]
+        
+        # Rename and rescale camera parameters
+        reconstruction = rename_colmap_recons_and_rescale_camera(
+            reconstruction,
+            base_image_path_list,
+            original_coords.cpu().numpy(),
+            img_size=reconstruction_resolution,
+            shift_point2d_to_original_res=False,
+            shared_camera=args.shared_camera if args.use_ba else False,
+        )
     
     # Extract point cloud
     if reconstruction is not None:
