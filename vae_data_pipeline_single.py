@@ -380,6 +380,8 @@ def process_window(
         # Feedforward approach
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 200000
+        shared_camera = False
+        camera_type = "PINHOLE"
         
         image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
         num_frames, height, width, _ = points_3d.shape
@@ -409,8 +411,8 @@ def process_window(
             extrinsic,
             intrinsic,
             image_size,
-            shared_camera=False,
-            camera_type="PINHOLE",
+            shared_camera=shared_camera,
+            camera_type=camera_type,
         )
         
         reconstruction_resolution = vggt_fixed_resolution
