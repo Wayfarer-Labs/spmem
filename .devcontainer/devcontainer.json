@@ -11,7 +11,8 @@
 	],
     "mounts": [
         "source=${localWorkspaceFolder}/testdata,target=/workspace/testdata,type=bind,consistency=cached",
-        "source=${localWorkspaceFolder}/../../cod-output,target=/workspace/cod-output,type=bind,consistency=cached"
+        "source=${localWorkspaceFolder}/../../cod-output,target=/workspace/cod-output,type=bind,consistency=cached",
+        "source=${localWorkspaceFolder}/../../cod-playlist,target=/workspace/cod-playlist,type=bind,consistency=cached"
     ],
     "workspaceFolder": "/workspace",
     "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
