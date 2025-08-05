@@ -45,6 +45,7 @@ import pycolmap
 import trimesh
 import copy
 
+import traceback
 # Compile for performance
 predict_tracks = torch.compile(predict_tracks)
 
@@ -79,7 +80,7 @@ def parse_args():
                    help="Number of GPUs to use")
                    
     # VGGT/COLMAP settings
-    p.add_argument("--use-ba", action="store_true", default=True, 
+    p.add_argument("--use-ba", action="store_true", default=False, 
                    help="Use Bundle Adjustment for reconstruction")
     p.add_argument("--max-reproj-error", type=float, default=8.0,
                    help="Maximum reprojection error for reconstruction")
@@ -95,7 +96,7 @@ def parse_args():
                    help="Maximum number of query points")
     p.add_argument("--fine-tracking", action="store_true", default=True,
                    help="Use fine tracking (slower but more accurate)")
-    p.add_argument("--conf-thres-value", type=float, default=5.0,
+    p.add_argument("--conf-thres-value", type=float, default=1.01,
                    help="Confidence threshold value for depth filtering (wo BA)")
 
     
@@ -163,6 +164,24 @@ def load_vggt_models():
     
     return vggt_model, dinov2_model, vggsfm_tracker_model
 
+def run_VGGT(model, images, dtype, resolution=518):
+    """
+    Run VGGT model to get extrinsic, intrinsic matrices and depth maps.
+    From colmap_demo.py
+    """
+    # images: [B, 3, H, W]
+    assert len(images.shape) == 4
+    assert images.shape[1] == 3
+
+    # hard-coded to use 518 for VGGT
+    images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
+
+    with torch.no_grad():
+        with torch.amp.autocast("cuda", dtype=dtype):
+            extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd_vggt(model, images)
+
+    return extrinsic, intrinsic, depth_map, depth_conf, points_3d
+
 @torch.compile
 def fwd_vggt(model, images):
     """Forward pass through VGGT model."""
@@ -171,8 +190,8 @@ def fwd_vggt(model, images):
 
     # Predict Cameras
     pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+    # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
     extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-    
     # Predict Depth Maps
     depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
 
@@ -181,11 +200,12 @@ def fwd_vggt(model, images):
     depth_map = depth_map.squeeze(0)
     depth_conf = depth_conf.squeeze(0)
 
-    # Convert to numpy for processing
-    extrinsic, intrinsic, depth_map, depth_conf = [
-        x.cpu().numpy() for x in [extrinsic, intrinsic, depth_map, depth_conf]
-    ]
+    # numpy based, reference implementation
+    extrinsic, intrinsic, depth_map, depth_conf = [x.cpu().numpy() for x in [extrinsic, intrinsic, depth_map, depth_conf]]
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # experimental gpu implementation
+    # points_3d = torch_experimental_unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     return extrinsic, intrinsic, depth_map, depth_conf, points_3d
 
@@ -285,16 +305,16 @@ def process_window(
     original_coords[:, 3] = h  # height
     
     # VGGT processing
-    vggt_resolution = 518
+    vggt_fixed_resolution = 518
     img_load_resolution = max(w, h)
+
+    # print(f"{frames.shape} Using VGGT fixed resolution: {vggt_fixed_resolution}, img load resolution: {img_load_resolution}")
     
-    # Resize for VGGT
-    frames_resized = F.interpolate(frames, size=(vggt_resolution, vggt_resolution), 
-                                  mode="bilinear", align_corners=False)
+    # Run VGGT to estimate camera and depth
+    extrinsic, intrinsic, depth_map, depth_conf, points_3d = run_VGGT(vggt_model, frames, dtype, vggt_fixed_resolution)
     
-    # Run VGGT
-    extrinsic, intrinsic, depth_map, depth_conf, points_3d = fwd_vggt(vggt_model, frames_resized)
-    
+    # print(frames.shape)
+    # print(frames[focal_idx].shape)
     # Extract focal frame data
     focal_rgb = frames[focal_idx]  # Original resolution
     focal_depth = torch.from_numpy(depth_map[focal_idx]).float()
@@ -313,7 +333,7 @@ def process_window(
         load_res = min(518, img_load_resolution)
         images_square = square_and_resize(frames, load_res)
         image_size = np.array(images_square.shape[-2:])
-        scale = img_load_resolution / vggt_resolution
+        scale = img_load_resolution / vggt_fixed_resolution
         
         images_square = images_square.cuda()
         with torch.amp.autocast("cuda", dtype=dtype):
@@ -358,20 +378,21 @@ def process_window(
             
             reconstruction_resolution = img_load_resolution
         else:
-            print("Warning: BA reconstruction failed, falling back to feedforward")
-            reconstruction = None
-            
-    if not args.use_ba or reconstruction is None:
+            print("Warning: BA reconstruction failed")
+            return
+    else:     
         # Feedforward approach
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 200000
+        shared_camera = False
+        camera_type = "PINHOLE"
         
-        image_size = np.array([vggt_resolution, vggt_resolution])
+        image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
         num_frames, height, width, _ = points_3d.shape
         
         # Get RGB colors for points
         points_rgb = F.interpolate(
-            frames, size=(vggt_resolution, vggt_resolution), mode="bilinear", align_corners=False
+            frames, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
         )
         points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
         points_rgb = points_rgb.transpose(0, 2, 3, 1)
@@ -382,7 +403,10 @@ def process_window(
         # Apply confidence threshold
         conf_mask = depth_conf >= conf_thres_value
         conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
-        
+
+        # print(f"Points passing confidence threshold: {conf_mask.sum()}")
+        # print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+
         points_3d = points_3d[conf_mask]
         points_xyf = points_xyf[conf_mask]
         points_rgb = points_rgb[conf_mask]
@@ -394,11 +418,26 @@ def process_window(
             extrinsic,
             intrinsic,
             image_size,
-            shared_camera=False,
-            camera_type="PINHOLE",
+            shared_camera=shared_camera,
+            camera_type=camera_type,
         )
         
-        reconstruction_resolution = vggt_resolution
+        reconstruction_resolution = vggt_fixed_resolution
+    
+    # Always rename and rescale camera parameters after reconstruction
+    if reconstruction is not None:
+        # Create base image path list
+        base_image_path_list = [f"frame_{i:03d}.png" for i in range(batch_size)]
+        
+        # Rename and rescale camera parameters
+        reconstruction = rename_colmap_recons_and_rescale_camera(
+            reconstruction,
+            base_image_path_list,
+            original_coords.cpu().numpy(),
+            img_size=reconstruction_resolution,
+            shift_point2d_to_original_res=False,
+            shared_camera=args.shared_camera if args.use_ba else False,
+        )
     
     # Extract point cloud
     if reconstruction is not None:
@@ -411,7 +450,11 @@ def process_window(
         if len(points_list) > 0:
             points_array = np.array(points_list)  # [N, 3]
             colors_array = np.array(colors_list)  # [N, 3]
+            # ply_path = os.path.join('.', f"points_{focal_idx}.ply")
+            # trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
             
+            # print(f"Generated {len(points_list)} 3D points")
+
             # Combine into [N, 6] format
             point_cloud = np.concatenate([points_array, colors_array], axis=1)
             point_cloud = torch.from_numpy(point_cloud).float()
@@ -456,7 +499,8 @@ def save_data_sample(
         depth_normalized = (depth_normalized / depth_normalized.max() * 255).astype(np.uint8)
     else:
         depth_normalized = np.zeros_like(depth_normalized, dtype=np.uint8)
-    Image.fromarray(depth_normalized, mode='L').save(depth_path)
+
+    Image.fromarray(depth_normalized[...,0], mode='L').save(depth_path)
     
     # Save camera parameters
     torch.save(focal_camera.cpu(), camera_path)
@@ -522,7 +566,9 @@ def process_video_worker(
                     sample_idx += 1
                     
                 except Exception as e:
+                    error_trace = traceback.format_exc()
                     print(f"GPU {gpu_rank}: Error processing window {window_indices}: {e}")
+                    print(f"Traceback:\n{error_trace}")
                     continue
                     
         except Exception as e:
