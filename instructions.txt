@@ -1,0 +1,79 @@
+We have: A dataset of mp4s
+We want: A dataset for VAE training. We want a VAE that takes as input a frame, its depth map, its camera position, and a point cloud "around" it.
+Some more information:
+- Camera position is extrinsics + intrinsics for that frame relative to frames "around" it
+- Point cloud is created using a frame, the frames 5 seconds before it and the frames 5 seconds after it
+- I.e. there is a window around the frame and we get point cloud from that
+
+A note on how we do multi-gpu/multi-processing
+- We get all video paths then split them amongst processes.
+- Decord can read frames from a video
+- Each GPU processes its slice of the data
+- We do this with ray for one process per gpu
+
+Data pipeline:
+- Our data pipeline is in streaming_vggt.py It takes a frame window as a batch and produces several things from it.
+- What we care about is camera info and depth for the middle frame. 
+- While it's not what this is, let's look at it like a convolution, sliding across the video
+- We want to take slices of the video, and get the point clouds, depth maps, camera info (colmap output), and frames.
+- View the middle-most frame as the focal point. We really want rgb, depth map, camera info for that frame alone.
+- So if we do this convolution analogy:
+- Kernel size is always odd, the middle frame/focal point is the one we want rgb/depth/camera for
+- Say we are at frame 6, kernel size is 5, then we are feeding frames 4,5,6,7,8 as a batch to the pipeline to get point cloud
+across those frames, depth maps, camera info, we only care about rgb/depth/camera for frame 6, but we do want whole point cloud
+- Stride = 2 would mean that after doing the above processing step, we'd move on to 6,7,8,9,10 with 8 as the focal point
+- Dilation = 2 would mean that we expand the window around the focal point i.e. it goes from 6 7 8 9 10 -> 4 6 8 10 12
+- As an example, say we had kernel = 5, stride = 3, dilation = 2, we'd be processing the video like:
+0 2 4 6 8 -> 4 is the focal frame, point cloud over those 5 frames spread out, then  
+3 5 7 9 11 -> 7 is the focal frame, point cloud over those 5 frames spread out
+
+When you run out of frames you move on to next video.  
+
+What to write:
+- You'll be given some root dir.
+- Each GPU will be outputting to a folder based on rank/
+- Given the convolution analogy, we have parser args for kernel, stride, dilation
+- To not have too many files in a single dir, we have a limit of number of files per subdir (this is set by args, defaults to 500)
+
+Currently the VGGT pipeline writes something like
+  outputs/
+  ├── video1_batch_000_sparse/
+  │   ├── cameras.bin
+  │   ├── images.bin  
+  │   ├── points3D.bin
+  │   └── points.ply
+  ├── video1_batch_001_sparse/
+  │   ├── cameras.bin
+  │   ├── images.bin
+  │   ├── points3D.bin
+  │   └── points.ply
+  └── ...
+
+This is not ideal though. We want something so that for each gpu, it would be writing to
+0/
+-> 000000/
+--> 0000.jpg # frame as image
+--> 0000.depth.jpg # depth as image
+--> 0000.camera.pt # camera ext and int for the "focal" frame
+--> 0000.points.pt # [N,6] where each point gets [x,y,z,r,g,b]
+--> 0001.jpg
+--> ...
+--> 0500.jpg
+--> 0500.depth.jpg
+--> 0500.camera.pt
+--> 0500.points.pt
+-> 000001/
+--> 0000.jpg
+--> 0000.depth.jpg
+--> 0000.camera.pt
+--> 0000.points.pt 
+--> 0001.jpg
+--> ...
+--> 0500.jpg
+--> 0500.depth.jpg
+--> 0500.camera.pt
+--> 0500.points.pt
+...
+1/
+
+etc.
