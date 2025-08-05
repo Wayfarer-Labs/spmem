@@ -1,1 +1,11 @@
 cod-output/*
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Test outputs
+/tmp/batch_output/
+/tmp/test_output/
