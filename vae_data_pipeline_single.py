@@ -306,8 +306,8 @@ def process_window(
 
     for i, focal_idx in enumerate(focal_idxs):
         # Select the i-th window
-        frames = frames_batch[i].to(device)        # [T, C, H, W]
-
+        # frames = frames_batch[i].to(device)        # [T, C, H, W]
+        frames = frames_batch.to(device)  # [T, C, H, W]
         # 1) Original image coords
         original_coords = torch.zeros((T, 4), device=device)
         original_coords[:, 2] = W
@@ -316,7 +316,7 @@ def process_window(
         # 2) VGGT inference (add batch dim)
         extrinsic, intrinsic, depth_map, depth_conf, points_3d = run_VGGT(
             vggt_model,
-            frames.unsqueeze(0),               # [1, T, 3, H, W]
+            frames,               # [1, T, 3, H, W]
             dtype,
             518
         )
@@ -448,12 +448,12 @@ def process_window(
                 colors_array = np.array(cols_list)    # [N, 3]
                 pc = np.concatenate([points_array, colors_array], axis=1)
                 point_cloud = torch.from_numpy(pc).float()
-                # ply_path = os.path.join("./", "points.ply")
-                # print(f"Points passing confidence threshold: {conf_mask.sum()}")
-                # print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+                ply_path = os.path.join("./", "points.ply")
+                print(f"Points passing confidence threshold: {conf_mask.sum()}")
+                print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
 
-                # print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
-                # trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
+                print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
+                trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
 
             else:
                 point_cloud = torch.zeros((0, 6))
