@@ -58,7 +58,8 @@ def parse_args():
     # Input/Output
     p.add_argument("--video-dir", required=True, help="Directory containing MP4 videos")
     p.add_argument("--output-dir", required=True, help="Output directory for processed data")
-    
+    p.add_argument("--batch-size", required=True, help="number of parallel windows to process")
+
     # Sliding window parameters
     p.add_argument("--kernel-size", type=int, default=5, 
                    help="Window size around focal frame (must be odd)")
@@ -567,7 +568,7 @@ def process_video_worker(
             
             print(f"GPU {gpu_rank}: Created {len(windows)} windows for {video_path}")
             
-            window_batch_size = getattr(args, "window_batch_size", 4)
+            window_batch_size = getattr(args, "batch_size", 4)
             # split windows into batches of N
             window_batches = [
                 windows[i : i + window_batch_size]
