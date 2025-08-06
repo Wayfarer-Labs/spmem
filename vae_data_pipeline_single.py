@@ -169,12 +169,17 @@ def run_VGGT(model, images, dtype, resolution=518):
     Run VGGT model to get extrinsic, intrinsic matrices and depth maps.
     From colmap_demo.py
     """
-    # images: [B, 3, H, W]
-    assert len(images.shape) == 4
-    assert images.shape[1] == 3
+    # images: [B, N, 3, H, W]
+    assert len(images.shape) == 5
+    assert images.shape[2] == 3
 
+    b, n, c, h, w = images.shape
+    # flatten B and N to get a 4-D tensor
+    images = images.view(b * n, c, h, w)
     # hard-coded to use 518 for VGGT
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
+    # restore [B, N, 3, res, res]
+    images = images.view(b, n, c, resolution, resolution)
 
     with torch.no_grad():
         with torch.amp.autocast("cuda", dtype=dtype):
@@ -185,7 +190,7 @@ def run_VGGT(model, images, dtype, resolution=518):
 @torch.compile
 def fwd_vggt(model, images):
     """Forward pass through VGGT model."""
-    images = images[None]  # add batch dimension
+    # images = images[None]  # add batch dimension
     aggregated_tokens_list, ps_idx = model.aggregator(images)
 
     # Predict Cameras
@@ -281,191 +286,214 @@ def rename_colmap_recons_and_rescale_camera(
 
 @torch.no_grad()
 def process_window(
-    vggt_model, dinov2_model, vggsfm_tracker_model, 
-    frames: torch.Tensor, focal_idx: int, args
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    vggt_model, dinov2_model, vggsfm_tracker_model,
+    frames_batch: torch.Tensor, focal_idxs: List[int], args
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
-    Process a window of frames to extract focal frame data and point cloud.
-    
+    Process a batch of windows of frames to extract focal-frame data and point clouds.
+
+    Inputs:
+      frames_batch: [B, T, C, H, W] tensor
+      focal_idxs:   list of B focal-frame indices within each window
     Returns:
-        focal_rgb: RGB image of focal frame [3, H, W]
-        focal_depth: Depth map of focal frame [H, W] 
-        focal_camera: Camera parameters [extrinsic (3,4), intrinsic (3,3)]
-        point_cloud: Point cloud [N, 6] with [x,y,z,r,g,b]
+      4 lists of length B: focal_rgb, focal_depth, focal_camera, point_cloud
     """
     device = next(vggt_model.parameters()).device
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    
-    frames = frames.to(device)
-    batch_size, c, h, w = frames.shape
-    
-    # Create original coordinates
-    original_coords = torch.zeros((batch_size, 4), device=device)
-    original_coords[:, 2] = w  # width
-    original_coords[:, 3] = h  # height
-    
-    # VGGT processing
-    vggt_fixed_resolution = 518
-    img_load_resolution = max(w, h)
 
-    # print(f"{frames.shape} Using VGGT fixed resolution: {vggt_fixed_resolution}, img load resolution: {img_load_resolution}")
-    
-    # Run VGGT to estimate camera and depth
-    extrinsic, intrinsic, depth_map, depth_conf, points_3d = run_VGGT(vggt_model, frames, dtype, vggt_fixed_resolution)
-    
-    # print(frames.shape)
-    # print(frames[focal_idx].shape)
-    # Extract focal frame data
-    focal_rgb = frames[focal_idx]  # Original resolution
-    focal_depth = torch.from_numpy(depth_map[focal_idx]).float()
-    
-    # Focal camera parameters
-    focal_extrinsic = torch.from_numpy(extrinsic[focal_idx]).float()
-    focal_intrinsic = torch.from_numpy(intrinsic[focal_idx]).float()
-    focal_camera = torch.cat([
-        focal_extrinsic.flatten(),  # 12 elements 
-        focal_intrinsic.flatten()   # 9 elements
-    ])  # Total 21 elements
-    
-    # Generate point cloud from all frames
-    if args.use_ba:
-        # Bundle Adjustment approach
-        load_res = min(518, img_load_resolution)
-        images_square = square_and_resize(frames, load_res)
-        image_size = np.array(images_square.shape[-2:])
-        scale = img_load_resolution / vggt_fixed_resolution
-        
-        images_square = images_square.cuda()
-        with torch.amp.autocast("cuda", dtype=dtype):
-            pred_tracks, pred_vis_scores, pred_confs, points_3d, points_rgb = predict_tracks(
-                dinov2_model,
-                vggsfm_tracker_model,
-                images_square,
-                conf=depth_conf,
-                points_3d=points_3d,
-                masks=None,
-                max_query_pts=args.max_query_pts,
-                query_frame_num=args.query_frame_num,
-                keypoint_extractor="aliked+sp",
-                fine_tracking=args.fine_tracking,
+    B, T, C, H, W = frames_batch.shape
+    out_rgbs, out_depths, out_cams, out_pcls = [], [], [], []
+
+    for i, focal_idx in enumerate(focal_idxs):
+        # Select the i-th window
+        frames = frames_batch[i].to(device)        # [T, C, H, W]
+
+        # 1) Original image coords
+        original_coords = torch.zeros((T, 4), device=device)
+        original_coords[:, 2] = W
+        original_coords[:, 3] = H
+
+        # 2) VGGT inference (add batch dim)
+        extrinsic, intrinsic, depth_map, depth_conf, points_3d = run_VGGT(
+            vggt_model,
+            frames.unsqueeze(0),               # [1, T, 3, H, W]
+            dtype,
+            518
+        )
+        # extrinsic: np array [T, 3, 4], intrinsic: [T, 3, 3],
+        # depth_map, depth_conf: [T, res, res], points_3d: [T, res, res, 3]
+
+        # 3) Extract focal-frame RGB and depth
+        focal_rgb   = frames[focal_idx]                                # [3, H, W]
+        focal_depth = torch.from_numpy(depth_map[focal_idx]).float()   # [res, res]
+
+        # 4) Camera parameters for focal frame
+        fe = torch.from_numpy(extrinsic[focal_idx]).float()            # [3,4]
+        fi = torch.from_numpy(intrinsic[focal_idx]).float()            # [3,3]
+        focal_camera = torch.cat([fe.flatten(), fi.flatten()])         # [3*4 + 3*3 = 21]
+
+        # 5) Point-cloud reconstruction
+        if args.use_ba:
+            load_res = min(518, max(H, W))
+            images_square = square_and_resize(frames, load_res)
+            image_size = np.array(images_square.shape[-2:])
+            scale = max(H, W) / 518
+
+            images_square = images_square.to(device)
+            with torch.amp.autocast("cuda", dtype=dtype):
+                pred_tracks, pred_vis_scores, pred_confs, ba_points, points_rgb = predict_tracks(
+                    dinov2_model,
+                    vggsfm_tracker_model,
+                    images_square,
+                    conf=depth_conf,
+                    points_3d=points_3d,
+                    masks=None,
+                    max_query_pts=args.max_query_pts,
+                    query_frame_num=args.query_frame_num,
+                    keypoint_extractor="aliked+sp",
+                    fine_tracking=args.fine_tracking,
+                )
+                torch.cuda.empty_cache()
+
+            intrinsic[:] = intrinsic * scale if isinstance(intrinsic, np.ndarray) else intrinsic.mul_(scale)
+            track_mask = pred_vis_scores > args.vis_thresh
+            base_paths = [f"frame_{j:03d}.png" for j in range(T)]
+            reconstruction, _ = batch_np_matrix_to_pycolmap(
+                ba_points,
+                extrinsic,
+                intrinsic,
+                pred_tracks,
+                image_size,
+                masks=track_mask,
+                max_reproj_error=args.max_reproj_error,
+                shared_camera=args.shared_camera,
+                camera_type=args.camera_type,
+                points_rgb=points_rgb,
             )
-            torch.cuda.empty_cache()
-        
-        # Rescale intrinsic matrix
-        intrinsic[:, :2, :] *= scale
-        track_mask = pred_vis_scores > args.vis_thresh
-        
-        # Create base image path list
-        base_image_path_list = [f"frame_{i:03d}.png" for i in range(batch_size)]
-        
-        reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
-            points_3d,
-            extrinsic,
-            intrinsic,
-            pred_tracks,
-            image_size,
-            masks=track_mask,
-            max_reproj_error=args.max_reproj_error,
-            shared_camera=args.shared_camera,
-            camera_type=args.camera_type,
-            points_rgb=points_rgb,
-        )
-        
+            recon_res = max(H, W)
+            if reconstruction is not None:
+                ba_opts = pycolmap.BundleAdjustmentOptions()
+                pycolmap.bundle_adjustment(reconstruction, ba_opts)
+        else:
+            # Simple non-BA point-cloud: sample 3D points + their RGB colors
+            max_points_for_colmap = 200000
+
+            res = depth_conf.shape[-1]
+            conf_mask = depth_conf >= args.conf_thres_value
+            conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+            # 3D points at VGGT resolution
+            pts3d = points_3d[conf_mask]                   # [N, 3]
+            # corresponding pixel coordinates
+            pix_grid = create_pixel_coordinate_grid(T, res, res)[conf_mask]  # [N, 3]
+
+            # Resize all frames to VGGT resolution for color lookup
+            with torch.no_grad():
+                inp = frames if frames.dim() == 4 else frames.unsqueeze(0)
+                frames_res = F.interpolate(
+                    inp,                      # [T, C, H, W] or [1, C, H, W]
+                    size=(res, res),
+                    mode="bilinear",
+                    align_corners=False
+                )                         # [T, C, res, res] or [1, C, res, res]
+                # if we added a batch dim, remove it
+                if frames.dim() == 3:
+                    frames_res = frames_res.squeeze(0)
+             # convert to HWC
+            arr = frames_res.cpu().numpy().transpose(0, 2, 3, 1)  # [T, res, res, 3]
+
+            # clamp pixel indices and gather colors
+            pix = pix_grid.astype(int)
+            # First column is frame index, should be in range [0, T-1]
+            pix[:, 0] = np.clip(pix[:, 0], 0, T - 1)
+            # Second and third columns are y,x coordinates
+            pix[:, 1] = np.clip(pix[:, 1], 0, res - 1)
+            pix[:, 2] = np.clip(pix[:, 2], 0, res - 1)
+
+            # Extract colors at each pixel location and convert to uint8
+            colors = np.zeros((len(pts3d), 3), dtype=np.uint8)
+            for i, (f, y, x) in enumerate(pix):
+                colors[i] = (arr[f, y, x] * 255).astype(np.uint8)
+
+            reconstruction = batch_np_matrix_to_pycolmap_wo_track(
+                pts3d,
+                pix_grid,
+                colors,  # RGB data in [N, 3] format as uint8
+                extrinsic,
+                intrinsic,
+                np.array([res, res]),
+                shared_camera=args.shared_camera,
+                camera_type=args.camera_type,
+            )
+            recon_res = res
+
+        # 6) Rename/rescale camera & extract point cloud
         if reconstruction is not None:
-            # Bundle Adjustment
-            ba_options = pycolmap.BundleAdjustmentOptions()
-            pycolmap.bundle_adjustment(reconstruction, ba_options)
-            
-            reconstruction_resolution = img_load_resolution
+            base_paths = [f"frame_{j:03d}.png" for j in range(T)]
+            reconstruction = rename_colmap_recons_and_rescale_camera(
+                reconstruction,
+                base_paths,
+                original_coords.cpu().numpy(),
+                img_size=recon_res,
+                shift_point2d_to_original_res=False,
+                shared_camera=args.shared_camera if args.use_ba else False,
+            )
+
+            pts_list, cols_list = [], []
+            for p3d in reconstruction.points3D.values():
+                pts_list.append(p3d.xyz)
+                cols_list.append(p3d.color)
+            if pts_list:
+                points_array = np.array(pts_list)    # [N, 3]
+                colors_array = np.array(cols_list)    # [N, 3]
+                pc = np.concatenate([points_array, colors_array], axis=1)
+                point_cloud = torch.from_numpy(pc).float()
+                ply_path = os.path.join("./", "points.ply")
+                print(f"Points passing confidence threshold: {conf_mask.sum()}")
+                print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+
+                print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
+                trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
+
+            else:
+                point_cloud = torch.zeros((0, 6))
         else:
-            print("Warning: BA reconstruction failed")
-            return
-    else:     
-        # Feedforward approach
-        conf_thres_value = args.conf_thres_value
-        max_points_for_colmap = 200000
-        shared_camera = False
-        camera_type = "PINHOLE"
-        
-        image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
-        num_frames, height, width, _ = points_3d.shape
-        
-        # Get RGB colors for points
-        points_rgb = F.interpolate(
-            frames, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
-        )
-        points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
-        points_rgb = points_rgb.transpose(0, 2, 3, 1)
-        
-        # Create pixel coordinates
-        points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
-        
-        # Apply confidence threshold
-        conf_mask = depth_conf >= conf_thres_value
-        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+            point_cloud = torch.zeros((0, 6))
 
-        # print(f"Points passing confidence threshold: {conf_mask.sum()}")
-        # print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+        # 7) Collect outputs
+        out_rgbs.append(focal_rgb)
+        out_depths.append(focal_depth)
+        out_cams.append(focal_camera)
+        out_pcls.append(point_cloud)
 
-        points_3d = points_3d[conf_mask]
-        points_xyf = points_xyf[conf_mask]
-        points_rgb = points_rgb[conf_mask]
-        
-        reconstruction = batch_np_matrix_to_pycolmap_wo_track(
-            points_3d,
-            points_xyf,
-            points_rgb,
-            extrinsic,
-            intrinsic,
-            image_size,
-            shared_camera=shared_camera,
-            camera_type=camera_type,
-        )
-        
-        reconstruction_resolution = vggt_fixed_resolution
-    
-    # Always rename and rescale camera parameters after reconstruction
-    if reconstruction is not None:
-        # Create base image path list
-        base_image_path_list = [f"frame_{i:03d}.png" for i in range(batch_size)]
-        
-        # Rename and rescale camera parameters
-        reconstruction = rename_colmap_recons_and_rescale_camera(
-            reconstruction,
-            base_image_path_list,
-            original_coords.cpu().numpy(),
-            img_size=reconstruction_resolution,
-            shift_point2d_to_original_res=False,
-            shared_camera=args.shared_camera if args.use_ba else False,
-        )
-    
-    # Extract point cloud
-    if reconstruction is not None:
-        points_list = []
-        colors_list = []
-        for point3D in reconstruction.points3D.values():
-            points_list.append(point3D.xyz)
-            colors_list.append(point3D.color)
-        
-        if len(points_list) > 0:
-            points_array = np.array(points_list)  # [N, 3]
-            colors_array = np.array(colors_list)  # [N, 3]
-            # ply_path = os.path.join('.', f"points_{focal_idx}.ply")
-            # trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
-            
-            # print(f"Generated {len(points_list)} 3D points")
+    return out_rgbs, out_depths, out_cams, out_pcls
 
-            # Combine into [N, 6] format
-            point_cloud = np.concatenate([points_array, colors_array], axis=1)
-            point_cloud = torch.from_numpy(point_cloud).float()
-        else:
-            # Empty point cloud
-            point_cloud = torch.zeros((0, 6)).float()
-    else:
-        # Empty point cloud if reconstruction failed
-        point_cloud = torch.zeros((0, 6)).float()
-    
-    return focal_rgb, focal_depth, focal_camera, point_cloud
+def process_window_batch(vggt_model, dinov2_model, vggsfm_tracker_model,
+    frames_batch: torch.Tensor, focal_idxs: List[int], args
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    """
+    A thin wrapper around process_window that accepts:
+      - frames_batch: [B, T, C, H, W]
+      - focal_idxs:  list of B ints (focal index per window)
+    Returns 4 lists, each of length B.
+    """
+    # outs = ([], [], [], [])
+    # for i, fi in enumerate(focal_idxs):
+    #     frgb, fdepth, fcam, pcl = process_window(
+    #         vggt_model, dinov2_model, vggsfm_tracker_model,
+    #         frames_batch[i], fi, args
+    #     )
+    #     outs[0].append(frgb)
+    #     outs[1].append(fdepth)
+    #     outs[2].append(fcam)
+    #     outs[3].append(pcl)
+    # return outs
+    # feed the whole batch in one go and let process_window handle the per-window split
+    return process_window(
+        vggt_model, dinov2_model, vggsfm_tracker_model,
+        frames_batch, focal_idxs, args
+    )
+
 
 def save_data_sample(
     output_dir: str, gpu_rank: int, sample_idx: int, files_per_subdir: int,
@@ -539,32 +567,43 @@ def process_video_worker(
             
             print(f"GPU {gpu_rank}: Created {len(windows)} windows for {video_path}")
             
-            for window_indices, focal_frame_idx in tqdm(windows, desc=f"GPU {gpu_rank} windows", leave=False):
+            window_batch_size = getattr(args, "window_batch_size", 8)
+            # split windows into batches of N
+            window_batches = [
+                windows[i : i + window_batch_size]
+                for i in range(0, len(windows), window_batch_size)
+            ]
+
+            for batch in tqdm(window_batches, desc=f"GPU {gpu_rank} window batches", leave=False):
+                frames_list = []
+                focal_idxs  = []
                 try:
-                    # Load frames for this window
-                    frames_np = vr.get_batch(window_indices).asnumpy()  # [T, H, W, C]
-                    
-                    # Convert to tensor format [T, C, H, W] and normalize to [0,1]
-                    frames = torch.from_numpy(frames_np).float() / 255.0
-                    frames = frames.permute(0, 3, 1, 2)  # [T, C, H, W]
-                    
-                    # Find focal frame index within the window
-                    focal_idx_in_window = window_indices.index(focal_frame_idx)
-                    
-                    # Process window
-                    focal_rgb, focal_depth, focal_camera, point_cloud = process_window(
+
+                    # load all frames for this batch
+                    for window_indices, focal_frame_idx in batch:
+                        frames_np = vr.get_batch(window_indices).asnumpy()    # [T, H, W, C]
+                        frames = torch.from_numpy(frames_np).float().div_(255.0)  # [T, H, W, C]
+                        frames = frames.permute(0, 3, 1, 2)                       # [T, C, H, W]
+                        frames_list.append(frames)
+                        focal_idxs.append(window_indices.index(focal_frame_idx))
+                    # stack into [B, T, C, H, W]
+                    frames_batch = torch.stack(frames_list, dim=0)
+
+                    print(f"shapes: {frames_batch.shape}, focal_idxs: {focal_idxs}")
+                    # process the whole batch
+                    frgbs, fdepths, fcams, pcls = process_window_batch(
                         vggt_model, dinov2_model, vggsfm_tracker_model,
-                        frames, focal_idx_in_window, args
+                        frames_batch, focal_idxs, args
                     )
-                    
-                    # Save data sample
-                    save_data_sample(
-                        output_dir, gpu_rank, sample_idx, args.files_per_subdir,
-                        focal_rgb, focal_depth, focal_camera, point_cloud
-                    )
-                    
-                    sample_idx += 1
-                    
+
+                    # save each result
+                    for frgb, fdepth, fcam, pcl in zip(frgbs, fdepths, fcams, pcls):
+                        save_data_sample(
+                            output_dir, gpu_rank, sample_idx, args.files_per_subdir,
+                            frgb, fdepth, fcam, pcl
+                        )
+                        sample_idx += 1
+
                 except Exception as e:
                     error_trace = traceback.format_exc()
                     print(f"GPU {gpu_rank}: Error processing window {window_indices}: {e}")
