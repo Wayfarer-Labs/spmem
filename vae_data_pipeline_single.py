@@ -58,7 +58,7 @@ def parse_args():
     # Input/Output
     p.add_argument("--video-dir", required=True, help="Directory containing MP4 videos")
     p.add_argument("--output-dir", required=True, help="Output directory for processed data")
-    p.add_argument("--batch-size", required=True, help="number of parallel windows to process")
+    p.add_argument("--batch-size", type=int, required=True, help="number of parallel windows to process")
 
     # Sliding window parameters
     p.add_argument("--kernel-size", type=int, default=5, 
@@ -201,14 +201,28 @@ def fwd_vggt(model, images):
     # Predict Depth Maps
     depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
 
-    extrinsic = extrinsic.squeeze(0)
-    intrinsic = intrinsic.squeeze(0)
-    depth_map = depth_map.squeeze(0)
-    depth_conf = depth_conf.squeeze(0)
+    # extrinsic = extrinsic.squeeze(0)
+    # intrinsic = intrinsic.squeeze(0)
+    # depth_map = depth_map.squeeze(0)
+    # depth_conf = depth_conf.squeeze(0)
 
     # numpy based, reference implementation
     extrinsic, intrinsic, depth_map, depth_conf = [x.cpu().numpy() for x in [extrinsic, intrinsic, depth_map, depth_conf]]
-    points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # Process each frame separately if depth_map has more than 2 dimensions
+    print(f"depth_map shape: {depth_map.shape}, extrinsic shape: {extrinsic.shape}, intrinsic shape: {intrinsic.shape}")
+    if len(depth_map.shape) > 2:
+        points_3d = []
+        for i in range(depth_map.shape[0]):
+            cur_depth_map = depth_map[i]  # Extract 2D depth map for batch i
+            cur_extrinsic = extrinsic[i] if len(extrinsic.shape) > 2 else extrinsic
+            cur_intrinsic = intrinsic[i] if len(intrinsic.shape) > 2 else intrinsic
+            cur_points_3d = unproject_depth_map_to_point_map(cur_depth_map, cur_extrinsic, cur_intrinsic)
+            points_3d.append(cur_points_3d)
+        points_3d = np.stack(points_3d)  # Stack results back together
+    else:
+        # Original code path when depth_map already has 2 dimensions
+        points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     # experimental gpu implementation
     # points_3d = torch_experimental_unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
@@ -325,13 +339,18 @@ def process_window(
         # depth_map, depth_conf: [T, res, res], points_3d: [T, res, res, 3]
 
         # 3) Extract focal-frame RGB and depth
-        focal_rgb   = frames[focal_idx]                                # [3, H, W]
-        focal_depth = torch.from_numpy(depth_map[focal_idx]).float()   # [res, res]
+        focal_rgb   = frames[:, focal_idx]                                # [3, H, W]
+        focal_depth = torch.from_numpy(depth_map[:, focal_idx]).float()   # [res, res]
 
         # 4) Camera parameters for focal frame
-        fe = torch.from_numpy(extrinsic[focal_idx]).float()            # [3,4]
-        fi = torch.from_numpy(intrinsic[focal_idx]).float()            # [3,3]
-        focal_camera = torch.cat([fe.flatten(), fi.flatten()])         # [3*4 + 3*3 = 21]
+        fe = torch.from_numpy(extrinsic[:, focal_idx]).float()            # [3,4]
+        fi = torch.from_numpy(intrinsic[:, focal_idx]).float()            # [3,3]
+        # Flatten each tensor while preserving batch dimension
+        fe_flat = fe.reshape(fe.shape[0], -1)  # [B, 12]
+        fi_flat = fi.reshape(fi.shape[0], -1)  # [B, 9]
+
+        # Concatenate along dim=1 to preserve batch dimension
+        focal_camera = torch.cat([fe_flat, fi_flat], dim=1)  # [B, 21]
 
         # 5) Point-cloud reconstruction
         if args.use_ba:
@@ -381,27 +400,39 @@ def process_window(
 
             res = depth_conf.shape[-1]
             conf_mask = depth_conf >= args.conf_thres_value
-            conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
-
-            # 3D points at VGGT resolution
-            pts3d = points_3d[conf_mask]                   # [N, 3]
-            # corresponding pixel coordinates
-            pix_grid = create_pixel_coordinate_grid(T, res, res)[conf_mask]  # [N, 3]
-
+            # Flatten the mask first to match the shape expected by create_pixel_coordinate_grid
+            conf_mask_flat = conf_mask.reshape(-1)
+            # conf_mask_flat = randomly_limit_trues(conf_mask_flat, max_points_for_colmap)
+            
+            # 3D points at VGGT resolution - reshape to match flattened mask
+            pts3d = points_3d.reshape(-1, 3)[conf_mask_flat]  # [N, 3]
+            
+            # Get all pixel coordinates and then index with flattened mask
+            all_coords = create_pixel_coordinate_grid(T, res, res)
+            # conf_mask_flat = conf_mask.reshape(-1)
+            points_3d_flat = points_3d.reshape(-1, 3)
+            all_coords_flat = all_coords.reshape(-1, 3)  # Fully flatten the coordinates
+            
+            # Apply mask and limit points
+            conf_mask_flat = randomly_limit_trues(conf_mask_flat, max_points_for_colmap)
+            
+            # Index the flattened arrays
+            pts3d = points_3d_flat[conf_mask_flat]     # [N, 3]
+            pix_grid = all_coords_flat[conf_mask_flat]  # [N, 3]
             # Resize all frames to VGGT resolution for color lookup
             with torch.no_grad():
-                inp = frames if frames.dim() == 4 else frames.unsqueeze(0)
+                # Reshape to handle 5D tensor [B, T, C, H, W]
+                B, T, C, H, W = frames.shape
+                frames_reshaped = frames.view(B * T, C, H, W)  # Combine batch and time dims
                 frames_res = F.interpolate(
-                    inp,                      # [T, C, H, W] or [1, C, H, W]
+                    frames_reshaped,                   # [B*T, C, H, W]
                     size=(res, res),
                     mode="bilinear",
                     align_corners=False
-                )                         # [T, C, res, res] or [1, C, res, res]
-                # if we added a batch dim, remove it
-                if frames.dim() == 3:
-                    frames_res = frames_res.squeeze(0)
-             # convert to HWC
-            arr = frames_res.cpu().numpy().transpose(0, 2, 3, 1)  # [T, res, res, 3]
+                )                                      # [B*T, C, res, res]
+                # Reshape back to [B, T, C, res, res]
+                frames_res = frames_res.view(B, T, C, res, res)             # convert to HWC
+            arr = frames_res.cpu().numpy()  # [T, res, res, 3]
 
             # clamp pixel indices and gather colors
             pix = pix_grid.astype(int)
@@ -413,15 +444,26 @@ def process_window(
 
             # Extract colors at each pixel location and convert to uint8
             colors = np.zeros((len(pts3d), 3), dtype=np.uint8)
-            for i, (f, y, x) in enumerate(pix):
-                colors[i] = (arr[f, y, x] * 255).astype(np.uint8)
+            batch_size = 5000  # Process points in batches to avoid memory issues
+            batch_idx = 0  # Process the first batch if using 5D input
+
+            for i in range(0, len(pix), batch_size):
+                end_idx = min(i + batch_size, len(pix))
+                batch_pix = pix[i:end_idx]
+                
+                # Extract colors for this batch using vectorized indexing
+                # Correctly index the 5D array [B, T, C, res, res]
+                batch_colors = arr[batch_idx, batch_pix[:, 0], :, batch_pix[:, 1], batch_pix[:, 2]]
+                # Transpose from [C, N] to [N, C] shape
+                # batch_colors = np.transpose(batch_colors, (1, 0))
+                colors[i:end_idx] = (batch_colors * 255).astype(np.uint8)
 
             reconstruction = batch_np_matrix_to_pycolmap_wo_track(
                 pts3d,
                 pix_grid,
                 colors,  # RGB data in [N, 3] format as uint8
-                extrinsic,
-                intrinsic,
+                extrinsic[batch_idx],
+                intrinsic[batch_idx],
                 np.array([res, res]),
                 shared_camera=args.shared_camera,
                 camera_type=args.camera_type,
@@ -449,12 +491,12 @@ def process_window(
                 colors_array = np.array(cols_list)    # [N, 3]
                 pc = np.concatenate([points_array, colors_array], axis=1)
                 point_cloud = torch.from_numpy(pc).float()
-                ply_path = os.path.join("./", "points.ply")
-                print(f"Points passing confidence threshold: {conf_mask.sum()}")
-                print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+                # ply_path = os.path.join("./", "points.ply")
+                # print(f"Points passing confidence threshold: {conf_mask.sum()}")
+                # print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
 
-                print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
-                trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
+                # print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
+                # trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
 
             else:
                 point_cloud = torch.zeros((0, 6))
@@ -537,6 +579,28 @@ def save_data_sample(
     # Save point cloud
     torch.save(point_cloud.cpu(), points_path)
 
+def save_data_samples(
+    output_dir: str, gpu_rank: int, start_idx: int, files_per_subdir: int,
+    focal_rgbs: List[torch.Tensor], focal_depths: List[torch.Tensor], 
+    focal_cameras: List[torch.Tensor], point_clouds: List[torch.Tensor]
+):
+    """Save a batch of data samples to disk."""
+    # Ensure all lists have the same length
+    assert len(focal_rgbs) == len(focal_depths) == len(focal_cameras) == len(point_clouds)
+    
+    # Process each sample in the batch
+    for i, (rgb_batch, depth_batch, camera_batch, points_batch) in enumerate(zip(focal_rgbs, focal_depths, focal_cameras, point_clouds)):
+        sample_idx = start_idx + i
+        for rgb, depth, camera, points in zip(rgb_batch, depth_batch, camera_batch, points_batch):
+            # Save each sample
+            save_data_sample(
+                output_dir, gpu_rank, sample_idx, files_per_subdir,
+                rgb, depth, camera, points
+            )
+    
+    # Return the next sample index
+    return start_idx + len(focal_rgbs)
+
 def process_video_worker(
     video_paths: List[str], 
     output_dir: str,
@@ -597,13 +661,19 @@ def process_video_worker(
                         frames_batch, focal_idxs, args
                     )
 
+                    sample_idx = save_data_samples(
+                        output_dir, gpu_rank, sample_idx, args.files_per_subdir,
+                        frgbs, fdepths, fcams, pcls
+                    )
+
                     # save each result
-                    for frgb, fdepth, fcam, pcl in zip(frgbs, fdepths, fcams, pcls):
-                        save_data_sample(
-                            output_dir, gpu_rank, sample_idx, args.files_per_subdir,
-                            frgb, fdepth, fcam, pcl
-                        )
-                        sample_idx += 1
+                    # for frgb, fdepth, fcam, pcl in zip(frgbs, fdepths, fcams, pcls):
+                    #     print(f"{frgb.shape}, {fdepth.shape}, {fcam.shape}, {pcl.shape}")
+                    #     save_data_sample(
+                    #         output_dir, gpu_rank, sample_idx, args.files_per_subdir,
+                    #         frgb, fdepth, fcam, pcl
+                    #     )
+                    #     sample_idx += 1
 
                 except Exception as e:
                     error_trace = traceback.format_exc()
@@ -612,7 +682,10 @@ def process_video_worker(
                     continue
                     
         except Exception as e:
+            error_trace = traceback.format_exc()
             print(f"GPU {gpu_rank}: Error processing video {video_path}: {e}")
+            print(f"Traceback:\n{error_trace}")
+
             continue
     
     print(f"GPU {gpu_rank}: Completed processing {len(video_paths)} videos, generated {sample_idx} samples")
