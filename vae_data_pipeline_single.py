@@ -448,12 +448,12 @@ def process_window(
                 colors_array = np.array(cols_list)    # [N, 3]
                 pc = np.concatenate([points_array, colors_array], axis=1)
                 point_cloud = torch.from_numpy(pc).float()
-                ply_path = os.path.join("./", "points.ply")
-                print(f"Points passing confidence threshold: {conf_mask.sum()}")
-                print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
+                # ply_path = os.path.join("./", "points.ply")
+                # print(f"Points passing confidence threshold: {conf_mask.sum()}")
+                # print(f"Percentage of points kept: {100 * conf_mask.sum() / conf_mask.size:.2f}%")
 
-                print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
-                trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
+                # print(f"Saving point cloud with {len(point_cloud)} points to {ply_path}")
+                # trimesh.PointCloud(points_array, colors=colors_array).export(ply_path)
 
             else:
                 point_cloud = torch.zeros((0, 6))
@@ -567,7 +567,7 @@ def process_video_worker(
             
             print(f"GPU {gpu_rank}: Created {len(windows)} windows for {video_path}")
             
-            window_batch_size = getattr(args, "window_batch_size", 8)
+            window_batch_size = getattr(args, "window_batch_size", 4)
             # split windows into batches of N
             window_batches = [
                 windows[i : i + window_batch_size]
