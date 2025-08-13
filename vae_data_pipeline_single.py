@@ -620,7 +620,7 @@ def process_video_worker(
     for video_path in tqdm(video_paths, desc=f"GPU {gpu_rank} videos"):
         try:
             # Load video with decord
-            vr = decord.VideoReader(video_path)
+            vr = decord.VideoReader(video_path, num_threads=0)
             num_frames = len(vr)
             
             print(f"GPU {gpu_rank}: Processing {video_path} ({num_frames} frames)")
