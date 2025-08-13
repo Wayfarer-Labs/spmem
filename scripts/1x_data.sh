@@ -6,4 +6,5 @@ uv run /workspace/vae_data_pipeline_single.py \
     --stride 6 \
     --dilation 6 \
     --files-per-subdir 500 \
-    --num-gpus 1
+    --num-gpus 4 \
+    --batch-size 1
