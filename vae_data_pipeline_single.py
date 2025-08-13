@@ -77,7 +77,7 @@ def parse_args():
                    help="Number of GPUs to use (default: all available)")
     p.add_argument("--rank", type=int, default=0,
                    help="Rank of this process (which GPU index to use)")
-    p.add_argument("--world-size", type=int, default=8,
+    p.add_argument("--world-size", type=int, default=4,
                    help="Number of GPUs to use")
                    
     # VGGT/COLMAP settings
