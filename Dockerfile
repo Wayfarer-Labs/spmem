@@ -36,4 +36,4 @@ COPY . /workspace
 RUN uv sync
 
 # Default command
-CMD ["uv", "run", "main.py"]
+# CMD ["uv", "run", "main.py"]
