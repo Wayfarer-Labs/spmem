@@ -1,6 +1,7 @@
 import ray
 import os
 from decord import VideoReader, AudioReader
+import decord
 import torch
 from tqdm import tqdm
 import argparse
