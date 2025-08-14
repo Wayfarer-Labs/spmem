@@ -1,2 +1,4 @@
 cod-output/*
 __pycache__/
+**/*.jpg
+**/*.pt
