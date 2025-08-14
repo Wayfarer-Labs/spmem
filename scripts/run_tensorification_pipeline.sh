@@ -41,7 +41,7 @@ SIZE_H=518
 SIZE_W=921
 # Interpreter handled by `uv run`
 FORCE_OVERWRITE=1
-DRY_RUN=1
+DRY_RUN=0
 VERBOSE=0
 PYTHON_BIN="uv run"
 
