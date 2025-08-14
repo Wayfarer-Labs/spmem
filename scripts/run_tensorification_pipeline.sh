@@ -36,7 +36,7 @@ fi
 
 # Defaults
 ROOT_DIR=/mnt/data/shahbuland/video-proc-2/datasets/cod-yt
-CHUNK_SIZE=2000
+CHUNK_SIZE=1000
 SIZE_H=518
 SIZE_W=921
 # Interpreter handled by `uv run`
@@ -45,7 +45,7 @@ DRY_RUN=0
 VERBOSE=0
 PYTHON_BIN="uv run"
 
-CPUS=16
+CPUS=64
 
 print_help() {
   sed -n '1,65p' "$0" | grep -v '^#!/' | sed '/^set -e/d'

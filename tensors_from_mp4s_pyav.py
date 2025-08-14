@@ -1,5 +1,7 @@
-import os
 import argparse
+import gc
+import os
+
 import ray
 import av
 import torch
@@ -60,10 +62,13 @@ def decode_video(path, chunk_size, output_size):
             n_frames = 0
             split_ind += 1
             del chunk
+            gc.collect()
 
     if frames:
         chunk = to_tensor(frames, output_size)
         torch.save(chunk, os.path.join(split_dir, f"{split_ind:08d}_rgb.pt"))
+        del chunk
+        gc.collect()
 
     return path
 
