@@ -43,6 +43,7 @@ SIZE_W=921
 FORCE_OVERWRITE=1
 DRY_RUN=1
 VERBOSE=0
+PYTHON_BIN="uv run"
 
 CPUS=16
 
@@ -112,7 +113,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 if [[ $VERBOSE -eq 1 ]]; then
-  echo "[INFO] Running: uv run ${ARGS[*]}"
+  echo "[INFO] Running: $PYTHON_BIN ${ARGS[*]}"
 fi
 
-exec uv run "${ARGS[@]}"
+exec $PYTHON_BIN "${ARGS[@]}"
