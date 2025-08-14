@@ -27,10 +27,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PY_FILE="${REPO_ROOT}/tensors_from_mp4s.py"
+PY_FILE="${REPO_ROOT}/tensors_from_mp4s_pyav.py"
 
 if [[ ! -f "$PY_FILE" ]]; then
-  echo "[ERR] Cannot locate tensors_from_mp4s.py at $PY_FILE" >&2
+  echo "[ERR] Cannot locate tensors_from_mp4s_pyav.py at $PY_FILE" >&2
   exit 2
 fi
 
@@ -41,7 +41,7 @@ SIZE_H=518
 SIZE_W=921
 # Interpreter handled by `uv run`
 FORCE_OVERWRITE=1
-DRY_RUN=0
+DRY_RUN=1
 VERBOSE=0
 
 CPUS=16

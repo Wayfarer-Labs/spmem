@@ -50,7 +50,7 @@ def decode_video(path, chunk_size, output_size):
     n_frames = 0
     split_ind = 0
 
-    for img in _iter_video_frames_pyav(path):
+    for img in tqdm(_iter_video_frames_pyav(path)):
         frames.append(img)
         n_frames += 1
         if n_frames >= chunk_size:
