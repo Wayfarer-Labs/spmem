@@ -22,22 +22,23 @@ def get_video_paths(root_dir):
     return video_paths
 
 
-def to_tensor(frames, output_size):
+def to_tensor(frames):
     # frames: list of np arrays [H,W,C] uint8
     frames = [torch.from_numpy(f) for f in frames]
     frames = torch.stack(frames, dim=0)  # [N,H,W,C]
     frames = frames.permute(0, 3, 1, 2)  # [N,C,H,W]
-    frames = torch.nn.functional.interpolate(frames, size=output_size, mode='bilinear', align_corners=False)
+    # frames = torch.nn.functional.interpolate(frames, size=output_size, mode='bilinear', align_corners=False)
     frames = frames.to(torch.uint8).cpu()
     return frames
 
 
-def _iter_video_frames_pyav(path):
+def _iter_video_frames_pyav(path, output_size):
     # Yields numpy arrays in RGB order
     # Using PyAV's native decoding. PyAV gives frames in planar format; convert to RGB ndarray.
     with av.open(path) as container:
         stream = container.streams.video[0]
         for frame in container.decode(stream):
+            frame = frame.reformat(width=output_size[1], height=output_size[0])
             # Convert to RGB24 packed format then to ndarray
             img = frame.to_ndarray(format='rgb24')  # shape [H,W,3], uint8
             yield img
@@ -52,11 +53,11 @@ def decode_video(path, chunk_size, output_size):
     n_frames = 0
     split_ind = 0
 
-    for img in _iter_video_frames_pyav(path):
+    for img in _iter_video_frames_pyav(path, output_size):
         frames.append(img)
         n_frames += 1
         if n_frames >= chunk_size:
-            chunk = to_tensor(frames, output_size)
+            chunk = to_tensor(frames)
             frames.clear()
             torch.save(chunk, os.path.join(split_dir, f"{split_ind:08d}_rgb.pt"))
             n_frames = 0
@@ -65,7 +66,7 @@ def decode_video(path, chunk_size, output_size):
             gc.collect()
 
     if frames:
-        chunk = to_tensor(frames, output_size)
+        chunk = to_tensor(frames)
         torch.save(chunk, os.path.join(split_dir, f"{split_ind:08d}_rgb.pt"))
         del chunk
         gc.collect()
