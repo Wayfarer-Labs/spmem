@@ -14,6 +14,7 @@ dependencies = [
     "lightglue",
     "pyceres==2.3",
     "pycolmap==3.10.0",
+    "ray>=2.48.0",
     "scikit-learn>=1.3.0",
     "skypilot-nightly[server]==1.0.0.dev20250618",
     "torch==2.5.1",
