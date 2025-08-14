@@ -15,13 +15,9 @@
 #   -p | --cpus N            Number of CPUs to allocate to Ray (default: system detected or 8)
 #   -f | --force             Force overwrite existing split rgb tensors
 #   -n | --dry-run           List videos that would be processed, then exit
-#   --python BIN             Python interpreter to use (default: python)
+#   (Python interpreter selection removed; always uses `uv run`)
 #   -v | --verbose           Echo the final command before running
 #   -h | --help              Show this help
-#
-# Environment overrides (optional):
-#   VAE_PIPELINE_PYTHON  -> Python interpreter (overridden by --python)
-#   VAE_PIPELINE_CPUS    -> Default CPU count (overridden by -p/--cpus)
 #
 # Exit codes:
 #   0 success / dry-run success
@@ -39,25 +35,16 @@ if [[ ! -f "$PY_FILE" ]]; then
 fi
 
 # Defaults
-ROOT_DIR=""
+ROOT_DIR=/mnt/data/shahbuland/video-proc-2/datasets/cod-yt
 CHUNK_SIZE=2000
-SIZE_H=360
-SIZE_W=640
-PYTHON_BIN="${VAE_PIPELINE_PYTHON:-python}"
+SIZE_H=518
+SIZE_W=720
+# Interpreter handled by `uv run`
 FORCE_OVERWRITE=0
 DRY_RUN=0
 VERBOSE=0
 
-# Detect CPU count if not set via env
-if [[ -n "${VAE_PIPELINE_CPUS:-}" ]]; then
-  CPUS="$VAE_PIPELINE_CPUS"
-else
-  if command -v nproc >/dev/null 2>&1; then
-    CPUS="$(nproc)"
-  else
-    CPUS=8
-  fi
-fi
+CPUS=2
 
 print_help() {
   sed -n '1,65p' "$0" | grep -v '^#!/' | sed '/^set -e/d'
@@ -79,8 +66,6 @@ while [[ $# -gt 0 ]]; do
       FORCE_OVERWRITE=1; shift;;
     -n|--dry-run)
       DRY_RUN=1; shift;;
-    --python)
-      PYTHON_BIN="$2"; shift 2;;
     -v|--verbose)
       VERBOSE=1; shift;;
     -h|--help)
@@ -101,8 +86,8 @@ if [[ ! -d "$ROOT_DIR" ]]; then
   exit 2
 fi
 
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "[ERR] Python interpreter not found: $PYTHON_BIN" >&2
+if ! command -v uv >/dev/null 2>&1; then
+  echo "[ERR] 'uv' is not installed or not on PATH. See: https://github.com/astral-sh/uv" >&2
   exit 2
 fi
 
@@ -127,7 +112,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 if [[ $VERBOSE -eq 1 ]]; then
-  echo "[INFO] Running: $PYTHON_BIN ${ARGS[*]}"
+  echo "[INFO] Running: uv run ${ARGS[*]}"
 fi
 
-exec "$PYTHON_BIN" "${ARGS[@]}"
+exec uv run "${ARGS[@]}"
