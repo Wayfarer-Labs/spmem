@@ -44,7 +44,7 @@ FORCE_OVERWRITE=1
 DRY_RUN=0
 VERBOSE=0
 
-CPUS=2
+CPUS=16
 
 print_help() {
   sed -n '1,65p' "$0" | grep -v '^#!/' | sed '/^set -e/d'
