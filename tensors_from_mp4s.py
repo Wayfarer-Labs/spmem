@@ -38,6 +38,7 @@ def decode_video(path, chunk_size, output_size):
     split_dir = os.path.dirname(path)
     split_dir = os.path.join(split_dir, "splits")
     os.makedirs(split_dir, exist_ok = True)
+    decord.bridge.set_bridge('torch')
 
     vr = VideoReader(path, ctx=decord.cpu(0))
     frames = []
@@ -76,7 +77,6 @@ if __name__ == "__main__":
 
     # Initialize ray with specified number of CPUs
     ray.init(num_cpus=args.num_cpus)
-    decord.bridge.set_bridge('torch')
 
     # Filter paths and prepare work
     paths_to_process = []
