@@ -38,7 +38,7 @@ fi
 ROOT_DIR=/mnt/data/shahbuland/video-proc-2/datasets/cod-yt
 CHUNK_SIZE=2000
 SIZE_H=518
-SIZE_W=720
+SIZE_W=921
 # Interpreter handled by `uv run`
 FORCE_OVERWRITE=0
 DRY_RUN=0
