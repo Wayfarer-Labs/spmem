@@ -1,0 +1,31 @@
+###############################################
+# SkyPilot tasks spec
+# IMPORTANT: If you append an inline command after sky.yaml on the CLI,
+# SkyPilot treats the YAML as a cluster spec only and does not use run:.
+# Use: sky launch -n ben-docker-point-cloud sky.yaml
+# Not: sky launch -n ben-docker-point-cloud sky.yaml bash
+###############################################
+
+tasks:
+  - name: ben-docker-point-cloud
+    resources:
+      cloud: kubernetes
+      accelerators: H200:8
+      image_id: us-central1-docker.pkg.dev/openworld-main/skypilot/spmem:v0.1
+    workdir: .
+    env:
+      PYTHONUNBUFFERED: "1"
+    setup: |
+      echo "[SETUP] $(date) host=$(hostname)";
+      which python || true
+    run: |
+      set -euo pipefail
+      echo "[RUN] Start $(date) host=$(hostname) pwd=$(pwd)"
+      ls -l scripts || { echo "scripts/ missing"; exit 1; }
+      if [ ! -f scripts/1x_data.sh ]; then echo "Missing scripts/1x_data.sh"; exit 2; fi
+      chmod +x scripts/1x_data.sh || true
+      echo "[RUN] Executing scripts/1x_data.sh";
+      ./scripts/1x_data.sh
+      rc=$?
+      echo "[RUN] Exit code: $rc at $(date)"
+      exit $rc

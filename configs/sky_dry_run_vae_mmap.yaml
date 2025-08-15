@@ -1,0 +1,49 @@
+# SkyPilot configuration for a dry run of vae_data_pipeline_mmap
+# Performs only dataset/video/window enumeration without loading models.
+# Adjust 'video_root' and 'output_dir' under the env section or pass as env vars.
+
+
+###############################################
+# SkyPilot tasks spec
+# IMPORTANT: If you append an inline command after sky.yaml on the CLI,
+# SkyPilot treats the YAML as a cluster spec only and does not use run:.
+# Use: sky launch -n ben-docker-point-cloud sky.yaml
+# Not: sky launch -n ben-docker-point-cloud sky.yaml bash
+###############################################
+
+name: vae-mmap-dry-run
+
+resources:
+  cloud: kubernetes
+  accelerators: H200:8
+  image_id: us-central1-docker.pkg.dev/openworld-main/skypilot/spmem:v0.1
+workdir: .
+env:
+  video_root: /mnt/data/shahbuland/video-proc-2/datasets/cod-yt
+  output_dir: /mnt/data/ben/cod-yt-sliding-window
+
+setup: |
+  echo "Setup phase (customize)."
+  mkdir spmem && cd spmem
+  git remote remove origin
+  git remote add origin https://github.com/Wayfarer-Labs/spmem
+  git fetch
+  git submodule sync --recursive
+  git submodule update --init --recursive
+  git checkout --force origin/main
+  uv sync
+
+run: |
+  echo "Starting dry run enumeration..."
+  python vae_data_pipeline_mmap.py \
+    --video-dir "$video_root" \
+    --output-dir "$output_dir" \
+    --batch-size 4 \
+    --kernel-size 5 \
+    --stride 3 \
+    --dilation 1 \
+    --files-per-subdir 500 \
+    --world-size 1 \
+    --rank 0 \
+    --dry-run
+  echo "Dry run completed."
