@@ -18,7 +18,7 @@ resources:
   accelerators: H200:8
   image_id: us-central1-docker.pkg.dev/openworld-main/skypilot/spmem:v0.1
 workdir: .
-env:
+envs:
   video_root: /mnt/data/shahbuland/video-proc-2/datasets/cod-yt
   output_dir: /mnt/data/ben/cod-yt-sliding-window
 
