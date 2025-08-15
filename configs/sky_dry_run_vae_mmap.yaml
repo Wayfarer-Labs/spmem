@@ -35,6 +35,8 @@ setup: |
 
 run: |
   echo "Starting dry run enumeration..."
+  ls -l "$video_root" || { echo "Video root not found"; exit 1; }
+  ls -l "$workdir"
   uv run vae_data_pipeline_mmap.py \
     --video-dir "$video_root" \
     --output-dir "$output_dir" \
