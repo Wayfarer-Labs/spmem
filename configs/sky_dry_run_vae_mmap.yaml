@@ -35,7 +35,7 @@ setup: |
 
 run: |
   echo "Starting dry run enumeration..."
-  python vae_data_pipeline_mmap.py \
+  uv run vae_data_pipeline_mmap.py \
     --video-dir "$video_root" \
     --output-dir "$output_dir" \
     --batch-size 4 \
