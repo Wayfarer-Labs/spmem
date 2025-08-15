@@ -113,6 +113,7 @@ def parse_args():
     p.add_argument("--chunk-cache-size", type=int, default=2, help="LRU cache size for chunk tensors")
     p.add_argument("--index-meta", action="store_true", help="Persist per-video chunk size metadata JSON for faster restarts")
     p.add_argument("--dry-run", action="store_true", help="List discovered videos, frame counts, window counts and exit without loading models")
+    p.add_argument("--allow-skip-corrupt", action="store_true", help="Skip corrupted *_rgb.pt chunk files instead of aborting (logs names)")
     return p.parse_args()
 
 
@@ -125,10 +126,11 @@ class ChunkedVideo:
     Each chunk file: torch.save of uint8 tensor [n, C=3, H, W]. We lazily load
     only the needed chunks when assembling windows.
     """
-    def __init__(self, splits_dir: Path, cache_size: int = 2, persist_index: bool = False):
+    def __init__(self, splits_dir: Path, cache_size: int = 2, persist_index: bool = False, allow_skip_corrupt: bool = False):
         self.splits_dir = splits_dir
         self.cache_size = cache_size
         self.persist_index = persist_index
+        self.allow_skip_corrupt = allow_skip_corrupt
         self.chunk_files = sorted(
             [p for p in splits_dir.glob("*_rgb.pt") if p.is_file()]
         )
@@ -160,17 +162,48 @@ class ChunkedVideo:
         self._chunk_sizes.clear()
         self._cum_sizes.clear()
         total = 0
+        corrupt_files = []
+        valid_files = []
         for cf in self.chunk_files:
-            t = torch.load(cf, map_location="cpu")  # [n,3,H,W]
+            try:
+                t = torch.load(cf, map_location="cpu")  # [n,3,H,W]
+            except Exception as e:
+                corrupt_files.append((cf, str(e)))
+                if not self.allow_skip_corrupt:
+                    raise RuntimeError(f"Corrupted chunk file: {cf} error={e}") from e
+                continue
+            # Basic structural validation
+            if not isinstance(t, torch.Tensor) or t.ndim != 4 or t.shape[1] != 3:
+                msg = f"Invalid tensor shape in {cf}: expected [N,3,H,W] got {getattr(t,'shape',None)}"
+                corrupt_files.append((cf, msg))
+                if not self.allow_skip_corrupt:
+                    raise RuntimeError(msg)
+                continue
             n, c, h, w = t.shape
             if self._shape is None:
                 self._shape = (c, h, w)
             else:
-                if self._shape != (c, h, w):  # pragma: no cover
-                    raise ValueError("Inconsistent chunk frame shapes detected")
+                if self._shape != (c, h, w):
+                    msg = f"Inconsistent chunk frame shape in {cf}: {c,h,w} vs {self._shape}"
+                    if not self.allow_skip_corrupt:
+                        raise ValueError(msg)
+                    corrupt_files.append((cf, msg))
+                    continue
             self._chunk_sizes.append(n)
             self._cum_sizes.append(total)
             total += n
+            valid_files.append(cf)
+        # Replace chunk_files with only valid ones if skipping corrupt
+        if self.allow_skip_corrupt:
+            self.chunk_files = valid_files
+            if corrupt_files:
+                print(f"[ChunkedVideo] {self.splits_dir}: skipped {len(corrupt_files)} corrupt chunks; kept {len(valid_files)}")
+                for cf, err in corrupt_files[:5]:
+                    print(f"  corrupt: {cf.name} -> {err}")
+                if len(corrupt_files) > 5:
+                    print(f"  ... {len(corrupt_files)-5} more corrupt files")
+        if not self._chunk_sizes:
+            raise RuntimeError(f"No valid chunk files remain in {self.splits_dir} (corrupt or incompatible)")
         if self.persist_index:
             try:
                 meta = {
@@ -412,7 +445,7 @@ def save_data_sample(output_dir: str, gpu_rank: int, sample_idx: int, files_per_
 # Video discovery & worker
 # ---------------------------------------------------------------------------
 
-def discover_chunked_videos(root: str, cache_size: int, persist_index: bool) -> List[ChunkedVideo]:
+def discover_chunked_videos(root: str, cache_size: int, persist_index: bool, allow_skip_corrupt: bool = False) -> List[ChunkedVideo]:
     """Discover all directories that contain VGGT chunk tensors (*_rgb.pt).
 
     Handles several common layouts produced by the extractor:
@@ -467,7 +500,7 @@ def discover_chunked_videos(root: str, cache_size: int, persist_index: bool) -> 
     vids: List[ChunkedVideo] = []
     for d in filtered_dirs:
         try:
-            vids.append(ChunkedVideo(d, cache_size=cache_size, persist_index=persist_index))
+            vids.append(ChunkedVideo(d, cache_size=cache_size, persist_index=persist_index, allow_skip_corrupt=allow_skip_corrupt))
         except Exception as e:
             print(f"Skipping {d}: {e}")
 
@@ -524,7 +557,12 @@ def main():
     if args.kernel_size % 2 == 0:
         print("Error: kernel_size must be odd"); sys.exit(1)
     os.makedirs(args.output_dir, exist_ok=True)
-    videos_all = discover_chunked_videos(args.video_dir, args.chunk_cache_size, args.index_meta)
+    videos_all = discover_chunked_videos(
+        args.video_dir,
+        args.chunk_cache_size,
+        args.index_meta,
+        allow_skip_corrupt=args.allow_skip_corrupt,
+    )
     if not videos_all:
         print(f"No chunked videos (splits/) found under {args.video_dir}")
         sys.exit(1)

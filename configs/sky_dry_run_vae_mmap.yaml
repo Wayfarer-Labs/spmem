@@ -47,5 +47,7 @@ run: |
     --files-per-subdir 500 \
     --world-size 1 \
     --rank 0 \
-    --dry-run
+    --dry-run \
+    --allow-skip-corrupt
+  
   echo "Dry run completed."
