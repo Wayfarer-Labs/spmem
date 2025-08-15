@@ -413,13 +413,70 @@ def save_data_sample(output_dir: str, gpu_rank: int, sample_idx: int, files_per_
 # ---------------------------------------------------------------------------
 
 def discover_chunked_videos(root: str, cache_size: int, persist_index: bool) -> List[ChunkedVideo]:
+    """Discover all directories that contain VGGT chunk tensors (*_rgb.pt).
+
+    Handles several common layouts produced by the extractor:
+      1. <video_dir>/splits/*.pt
+      2. <root>/<any_depth>/splits/*.pt
+      3. Root itself is a splits directory containing *.pt
+      4. Directories that contain *_rgb.pt even if not named 'splits'
+
+    We purposefully avoid relying solely on Path.rglob('splits') because
+    users reported missing directories; instead we scan for the pattern
+    *_rgb.pt and register the parent directories.
+    """
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.exists():
+        print(f"discover_chunked_videos: root does not exist: {root_path}")
+        return []
+
+    candidate_dirs: set[Path] = set()
+
+    # Fast pass: any directory named 'splits'
+    try:
+        for p in root_path.rglob('splits'):
+            if p.is_dir():
+                candidate_dirs.add(p)
+    except Exception:
+        pass
+
+    # Pass scanning for *_rgb.pt files (robust, may be slower on huge trees)
+    pt_pattern = '*_rgb.pt'
+    for pt_file in root_path.rglob(pt_pattern):
+        if pt_file.is_file():
+            candidate_dirs.add(pt_file.parent)
+
+    # If root itself directly holds chunk files
+    if any(root_path.glob(pt_pattern)):
+        candidate_dirs.add(root_path)
+
+    # Filter: keep only dirs that actually have >=1 *_rgb.pt
+    filtered_dirs: List[Path] = []
+    for d in candidate_dirs:
+        if any(d.glob(pt_pattern)):
+            filtered_dirs.append(d)
+
+    if not filtered_dirs:
+        print(f"discover_chunked_videos: No chunk dirs with pattern {pt_pattern} under {root_path}")
+        return []
+
+    # Sort for determinism
+    filtered_dirs.sort()
+    print(f"Discovered {len(filtered_dirs)} chunk directories. Initializing ChunkedVideo objects...")
+
     vids: List[ChunkedVideo] = []
-    print(f"discovering chunked videos in {root}", Path(root).rglob("splits"))
-    for splits_dir in glob(f"{root}/splits/**", recursive=True):
+    for d in filtered_dirs:
         try:
-            vids.append(ChunkedVideo(splits_dir, cache_size=cache_size, persist_index=persist_index))
-        except Exception:
-            continue
+            vids.append(ChunkedVideo(d, cache_size=cache_size, persist_index=persist_index))
+        except Exception as e:
+            print(f"Skipping {d}: {e}")
+
+    print(f"Validated {len(vids)} chunked video directories (kept). Skipped {len(filtered_dirs) - len(vids)}.")
+    # Show a brief sample for debugging
+    for show in vids[:5]:
+        print(f"  sample dir: {show.splits_dir} (frames={show.num_frames})")
+    if len(vids) > 5:
+        print(f"  ... {len(vids)-5} more")
     return vids
 
 
