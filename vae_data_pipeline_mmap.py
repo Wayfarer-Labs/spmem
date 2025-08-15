@@ -415,7 +415,7 @@ def save_data_sample(output_dir: str, gpu_rank: int, sample_idx: int, files_per_
 def discover_chunked_videos(root: str, cache_size: int, persist_index: bool) -> List[ChunkedVideo]:
     vids: List[ChunkedVideo] = []
     print(f"discovering chunked videos in {root}", Path(root).rglob("splits"))
-    for splits_dir in glob.glob(f"{root}/splits/**", recursive=True):
+    for splits_dir in glob(f"{root}/splits/**", recursive=True):
         try:
             vids.append(ChunkedVideo(splits_dir, cache_size=cache_size, persist_index=persist_index))
         except Exception:
