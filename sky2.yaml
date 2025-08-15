@@ -1,0 +1,26 @@
+name: owl-point-clouds
+
+resources:
+  image_id: us-central1-docker.pkg.dev/openworld-main/skypilot/spmem:v0.1
+    #  accelerators: H200:4
+  cloud: kubernetes
+  cpus: 64+
+  memory: 256+
+workdir: .
+
+setup: |
+  echo "Setup phase (customize)."
+  mkdir spmem && cd spmem
+  git remote remove origin
+  git remote add origin https://github.com/Wayfarer-Labs/spmem
+  git fetch
+  git submodule sync --recursive
+  git submodule update --init --recursive
+  git checkout --force origin/main
+  uv sync
+
+run: |
+  echo "Starting run_tensorification_pipeline.sh at $(date)"
+  chmod +x scripts/run_tensorification_pipeline.sh || true
+  scripts/run_tensorification_pipeline.sh
+  echo "Done $(date)"
