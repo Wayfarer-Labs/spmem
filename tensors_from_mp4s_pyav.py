@@ -219,7 +219,7 @@ def main():
         return
 
     # Launch decoding tasks
-    futures = [decode_video.remote(path, split_dir, args.chunk_size, tuple(args.output_size), True)
+    futures = [decode_video.remote(path, split_dir, args.chunk_size, tuple(args.output_size), False)
                for (path, split_dir) in paths_to_process]
 
     with tqdm(total=len(futures), desc="Processing videos") as pbar:

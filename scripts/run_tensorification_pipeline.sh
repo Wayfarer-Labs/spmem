@@ -47,7 +47,7 @@ DRY_RUN=0
 VERBOSE=0
 PYTHON_BIN="uv run"
 
-CPUS=128
+CPUS=64
 
 print_help() {
   sed -n '1,65p' "$0" | grep -v '^#!/' | sed '/^set -e/d'
