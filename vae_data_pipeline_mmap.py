@@ -166,7 +166,7 @@ class ChunkedVideo:
         valid_files = []
         for cf in self.chunk_files:
             try:
-                t = torch.load(cf, map_location="cpu")  # [n,3,H,W]
+                t = torch.load(cf, map_location="cpu", weights_only=True)  # [n,3,H,W]
             except Exception as e:
                 corrupt_files.append((cf, str(e)))
                 if not self.allow_skip_corrupt:
@@ -232,7 +232,7 @@ class ChunkedVideo:
             val = self._cache.pop(key)
             self._cache[key] = val  # move to end (recent)
             return val
-        t = torch.load(cf, map_location="cpu")  # uint8
+        t = torch.load(cf, map_location="cpu", weights_only=True)  # uint8
         self._cache[key] = t
         if len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)  # evict LRU
