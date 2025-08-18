@@ -153,7 +153,7 @@ def decode_video(path: str, split_dir: Optional[str], chunk_size: int, output_si
             split_ind += 1
             del chunk
             gc.collect()
-            print(".", end='')
+            print(f"Saved chunk {split_ind} for {path} to {out_file}")
 
     if frames:
         chunk = to_tensor(frames)
