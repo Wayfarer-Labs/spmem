@@ -46,7 +46,7 @@ def _iter_video_frames_pyav(path, output_size):
             frame = frame.reformat(width=output_size[1], height=output_size[0])
             # Convert to RGB24 packed format then to ndarray
             img = frame.to_ndarray(format='rgb24')  # shape [H,W,3], uint8
-            print(img.shape, img.dtype)  # Debugging output
+            # print(img.shape, img.dtype)  # Debugging output
             yield img
 
 
