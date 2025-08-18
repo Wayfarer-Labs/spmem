@@ -183,29 +183,35 @@ def main():
     paths_to_process = []  # list of (video_path, split_dir)
     root_dir_abs = os.path.abspath(args.root_dir)
     for path in video_paths:
-        # Determine destination splits directory (supports optional relocation)
+        # Determine destination splits directory (always per-video isolation: splits/<video_stem>/)
+        video_parent = os.path.dirname(path)
+        video_stem = os.path.splitext(os.path.basename(path))[0]
         if args.output_root:
             try:
-                rel_parent = os.path.relpath(os.path.dirname(path), root_dir_abs)
+                rel_parent = os.path.relpath(video_parent, root_dir_abs)
             except ValueError:
-                # If path not under root_dir (should not happen), fallback to basename
-                rel_parent = os.path.basename(os.path.dirname(path))
-            split_dir = os.path.join(os.path.abspath(args.output_root), rel_parent, 'splits')
+                rel_parent = os.path.basename(video_parent)
+            split_dir = os.path.join(os.path.abspath(args.output_root), rel_parent, 'splits', video_stem)
         else:
-            split_dir = os.path.join(os.path.dirname(path), 'splits')
+            split_dir = os.path.join(video_parent, 'splits', video_stem)
 
-        if os.path.exists(split_dir) and not args.force_overwrite:
-            # Heuristic: consider processed if at least one *_rgb.pt exists
-            if any(f.endswith('_rgb.pt') for f in os.listdir(split_dir)):
-                print(f"Skipping {path} - already processed at {split_dir}")
-                continue
-        elif os.path.exists(split_dir) and args.force_overwrite:
-            for file in os.listdir(split_dir):
-                if file.endswith('_rgb.pt'):
-                    try:
-                        os.remove(os.path.join(split_dir, file))
-                    except OSError:
-                        pass
+        if os.path.exists(split_dir):
+            if not args.force_overwrite:
+                if any(f.endswith('_rgb.pt') for f in os.listdir(split_dir)):
+                    print(f"Skipping {path} - already processed at {split_dir}")
+                    continue
+            else:
+                removed = 0
+                for file in os.listdir(split_dir):
+                    if file.endswith('_rgb.pt'):
+                        fp = os.path.join(split_dir, file)
+                        try:
+                            os.remove(fp)
+                            removed += 1
+                        except OSError:
+                            pass
+                if removed:
+                    print(f"Cleared {removed} old chunk(s) in {split_dir}")
         paths_to_process.append((path, split_dir))
 
     if not paths_to_process:
