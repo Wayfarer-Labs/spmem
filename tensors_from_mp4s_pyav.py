@@ -5,7 +5,7 @@ import tempfile
 import json
 import hashlib
 import shutil
-from typing import Tuple
+from typing import Tuple, Optional
 
 import ray
 import av
@@ -116,8 +116,25 @@ def _atomic_save_tensor(tensor: torch.Tensor, out_path: str, verify: bool, max_r
 
 
 @ray.remote
-def decode_video(path, chunk_size, output_size, verify_save: bool = False):
-    split_dir = os.path.join(os.path.dirname(path), "splits")
+def decode_video(path: str, split_dir: Optional[str], chunk_size: int, output_size, verify_save: bool = False):
+    """Decode one video file into chunked RGB tensors.
+
+    Parameters
+    ----------
+    path : str
+        Source .mp4 path.
+    split_dir : Optional[str]
+        Destination directory to place chunk files ("splits" directory). If None,
+        defaults to sibling 'splits' directory next to the video (legacy behavior).
+    chunk_size : int
+        Number of frames per saved tensor chunk.
+    output_size : (int,int)
+        (H,W) resize for decoded frames prior to saving.
+    verify_save : bool
+        If True, perform hash verification after each save.
+    """
+    if split_dir is None:
+        split_dir = os.path.join(os.path.dirname(path), "splits")
     os.makedirs(split_dir, exist_ok=True)
 
     frames = []
@@ -155,6 +172,7 @@ def main():
     parser.add_argument('--output_size', type=int, nargs=2, default=[360, 640], help='Output size as two integers: height width')
     parser.add_argument('--force_overwrite', action='store_true', help='Force overwrite existing rgb tensors')
     parser.add_argument('--num_cpus', type=int, default=80, help='Number of CPUs to use for Ray')
+    parser.add_argument('--output-root', type=str, default=None, help='Optional root directory to place all splits/ subdirectories (mirrors relative paths under --root_dir)')
     # parser.add_argument('--verify-save', action='store_true', help='After writing each chunk, reload & hash-verify (slower, ensures integrity)')
     args = parser.parse_args()
 
@@ -162,23 +180,41 @@ def main():
 
     ray.init(num_cpus=args.num_cpus)
 
-    paths_to_process = []
+    paths_to_process = []  # list of (video_path, split_dir)
+    root_dir_abs = os.path.abspath(args.root_dir)
     for path in video_paths:
-        split_dir = os.path.join(os.path.dirname(path), "splits")
+        # Determine destination splits directory (supports optional relocation)
+        if args.output_root:
+            try:
+                rel_parent = os.path.relpath(os.path.dirname(path), root_dir_abs)
+            except ValueError:
+                # If path not under root_dir (should not happen), fallback to basename
+                rel_parent = os.path.basename(os.path.dirname(path))
+            split_dir = os.path.join(os.path.abspath(args.output_root), rel_parent, 'splits')
+        else:
+            split_dir = os.path.join(os.path.dirname(path), 'splits')
+
         if os.path.exists(split_dir) and not args.force_overwrite:
-            print(f"Skipping {path} - already processed")
-            continue
+            # Heuristic: consider processed if at least one *_rgb.pt exists
+            if any(f.endswith('_rgb.pt') for f in os.listdir(split_dir)):
+                print(f"Skipping {path} - already processed at {split_dir}")
+                continue
         elif os.path.exists(split_dir) and args.force_overwrite:
             for file in os.listdir(split_dir):
                 if file.endswith('_rgb.pt'):
-                    os.remove(os.path.join(split_dir, file))
-        paths_to_process.append(path)
+                    try:
+                        os.remove(os.path.join(split_dir, file))
+                    except OSError:
+                        pass
+        paths_to_process.append((path, split_dir))
 
     if not paths_to_process:
         print("No videos to process")
         return
 
-    futures = [decode_video.remote(path, args.chunk_size, tuple(args.output_size), True) for path in paths_to_process]
+    # Launch decoding tasks
+    futures = [decode_video.remote(path, split_dir, args.chunk_size, tuple(args.output_size), True)
+               for (path, split_dir) in paths_to_process]
 
     with tqdm(total=len(futures), desc="Processing videos") as pbar:
         while futures:

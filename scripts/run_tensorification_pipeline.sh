@@ -13,6 +13,7 @@
 #   -c | --chunk-size N      Frames per tensor chunk (default: 2000)
 #   -s | --size H W          Output frame size (height width) (default: 360 640)
 #   -p | --cpus N            Number of CPUs to allocate to Ray (default: system detected or 8)
+#   -o | --output-root DIR   Optional root where split chunks will be written (mirrors source tree)
 #   -f | --force             Force overwrite existing split rgb tensors
 #   -n | --dry-run           List videos that would be processed, then exit
 #   (Python interpreter selection removed; always uses `uv run`)
@@ -36,6 +37,7 @@ fi
 
 # Defaults
 ROOT_DIR=/mnt/data/shahbuland/video-proc-2/datasets/cod-yt
+OUTPUT_ROOT="/mnt/data/ben/datasets/cod-yt-tensors"
 CHUNK_SIZE=1000
 SIZE_H=518
 SIZE_W=921
@@ -63,6 +65,8 @@ while [[ $# -gt 0 ]]; do
       SIZE_H="$2"; SIZE_W="$3"; shift 3;;
     -p|--cpus)
       CPUS="$2"; shift 2;;
+    -o|--output-root)
+      OUTPUT_ROOT="$2"; shift 2;;
     -f|--force)
       FORCE_OVERWRITE=1; shift;;
     -n|--dry-run)
@@ -94,6 +98,9 @@ fi
 
 # Build python args
 ARGS=("$PY_FILE" --root_dir "$ROOT_DIR" --chunk_size "$CHUNK_SIZE" --output_size "$SIZE_H" "$SIZE_W" --num_cpus "$CPUS")
+if [[ -n "$OUTPUT_ROOT" ]]; then
+  ARGS+=(--output-root "$OUTPUT_ROOT")
+fi
 if [[ $FORCE_OVERWRITE -eq 1 ]]; then
   ARGS+=(--force_overwrite)
 fi
