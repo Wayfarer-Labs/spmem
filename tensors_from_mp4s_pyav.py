@@ -1,6 +1,11 @@
 import argparse
 import gc
 import os
+import tempfile
+import json
+import hashlib
+import shutil
+from typing import Tuple
 
 import ray
 import av
@@ -41,11 +46,77 @@ def _iter_video_frames_pyav(path, output_size):
             frame = frame.reformat(width=output_size[1], height=output_size[0])
             # Convert to RGB24 packed format then to ndarray
             img = frame.to_ndarray(format='rgb24')  # shape [H,W,3], uint8
+            print(img.shape, img.dtype)  # Debugging output
             yield img
 
 
+def _tensor_sha256(t: torch.Tensor) -> str:
+    # compute hash on CPU contiguous bytes
+    arr = t.contiguous().numpy().tobytes()
+    return hashlib.sha256(arr).hexdigest()
+
+
+def _atomic_save_tensor(tensor: torch.Tensor, out_path: str, verify: bool, max_retries: int = 3):
+    """Atomically save a tensor with optional verification & metadata.
+
+    Writes to a temp file then moves into place to avoid partial writes.
+    If verify=True, re-loads the tensor, compares shape/dtype/hash.
+    A sidecar JSON (.meta) file stores basic metadata & hash for later quick checks.
+    """
+    directory = os.path.dirname(out_path)
+    base = os.path.basename(out_path)
+    meta_path = out_path + '.meta'
+    for attempt in range(1, max_retries + 1):
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=base + '.tmp.')
+        os.close(tmp_fd)
+        try:
+            # Save tensor
+            torch.save(tensor, tmp_path)
+            # fsync to reduce risk of corruption on crash
+            with open(tmp_path, 'rb') as f:
+                os.fsync(f.fileno())
+
+            if verify:
+                # Reload and verify
+                reloaded = torch.load(tmp_path, map_location='cpu')
+                if not isinstance(reloaded, torch.Tensor):
+                    raise ValueError('Reloaded object is not a tensor')
+                if reloaded.shape != tensor.shape or reloaded.dtype != tensor.dtype:
+                    raise ValueError(f'Shape/dtype mismatch after save: {reloaded.shape}/{reloaded.dtype} vs {tensor.shape}/{tensor.dtype}')
+                # Hash compare
+                h1 = _tensor_sha256(tensor.cpu())
+                h2 = _tensor_sha256(reloaded.cpu())
+                if h1 != h2:
+                    raise ValueError('Hash mismatch after save (possible corruption)')
+                meta = {
+                    'shape': list(tensor.shape),
+                    'dtype': str(tensor.dtype),
+                    'sha256': h1,
+                    'bytes': int(tensor.numel() * tensor.element_size()),
+                }
+                with open(meta_path + '.tmp', 'w') as mf:
+                    json.dump(meta, mf)
+                os.replace(meta_path + '.tmp', meta_path)
+
+            # Atomic move to final path
+            os.replace(tmp_path, out_path)
+            return
+        except Exception as e:
+            # Cleanup temp
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            if attempt == max_retries:
+                raise RuntimeError(f'Failed to save {out_path} after {max_retries} attempts: {e}') from e
+        finally:
+            # Ensure tmp_fd closed (already closed) and partial meta removed
+            pass
+
+
 @ray.remote
-def decode_video(path, chunk_size, output_size):
+def decode_video(path, chunk_size, output_size, verify_save: bool = False):
     split_dir = os.path.join(os.path.dirname(path), "splits")
     os.makedirs(split_dir, exist_ok=True)
 
@@ -59,7 +130,8 @@ def decode_video(path, chunk_size, output_size):
         if n_frames >= chunk_size:
             chunk = to_tensor(frames)
             frames.clear()
-            torch.save(chunk, os.path.join(split_dir, f"{split_ind:08d}_rgb.pt"))
+            out_file = os.path.join(split_dir, f"{split_ind:08d}_rgb.pt")
+            _atomic_save_tensor(chunk, out_file, verify=verify_save)
             n_frames = 0
             split_ind += 1
             del chunk
@@ -67,7 +139,8 @@ def decode_video(path, chunk_size, output_size):
 
     if frames:
         chunk = to_tensor(frames)
-        torch.save(chunk, os.path.join(split_dir, f"{split_ind:08d}_rgb.pt"))
+        out_file = os.path.join(split_dir, f"{split_ind:08d}_rgb.pt")
+        _atomic_save_tensor(chunk, out_file, verify=verify_save)
         del chunk
         gc.collect()
 
@@ -81,6 +154,7 @@ def main():
     parser.add_argument('--output_size', type=int, nargs=2, default=[360, 640], help='Output size as two integers: height width')
     parser.add_argument('--force_overwrite', action='store_true', help='Force overwrite existing rgb tensors')
     parser.add_argument('--num_cpus', type=int, default=80, help='Number of CPUs to use for Ray')
+    # parser.add_argument('--verify-save', action='store_true', help='After writing each chunk, reload & hash-verify (slower, ensures integrity)')
     args = parser.parse_args()
 
     video_paths = get_video_paths(args.root_dir)
@@ -103,7 +177,7 @@ def main():
         print("No videos to process")
         return
 
-    futures = [decode_video.remote(path, args.chunk_size, tuple(args.output_size)) for path in paths_to_process]
+    futures = [decode_video.remote(path, args.chunk_size, tuple(args.output_size), True) for path in paths_to_process]
 
     with tqdm(total=len(futures), desc="Processing videos") as pbar:
         while futures:
