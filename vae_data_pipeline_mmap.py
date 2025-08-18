@@ -114,6 +114,7 @@ def parse_args():
     p.add_argument("--index-meta", action="store_true", help="Persist per-video chunk size metadata JSON for faster restarts")
     p.add_argument("--dry-run", action="store_true", help="List discovered videos, frame counts, window counts and exit without loading models")
     p.add_argument("--allow-skip-corrupt", action="store_true", help="Skip corrupted *_rgb.pt chunk files instead of aborting (logs names)")
+    p.add_argument("--build-global-index", action="store_true", help="On rank 0, build a dataset_index.json enumerating all videos with cumulative frame ranges")
     return p.parse_args()
 
 
@@ -128,12 +129,12 @@ class ChunkedVideo:
     """
     def __init__(self, splits_dir: Path, cache_size: int = 2, persist_index: bool = False, allow_skip_corrupt: bool = False):
         self.splits_dir = splits_dir
+        # A stable identifier (relative path string) may be used in global index
+        self.video_id = splits_dir.name
         self.cache_size = cache_size
         self.persist_index = persist_index
         self.allow_skip_corrupt = allow_skip_corrupt
-        self.chunk_files = sorted(
-            [p for p in splits_dir.glob("*_rgb.pt") if p.is_file()]
-        )
+        self.chunk_files = sorted([p for p in splits_dir.glob("*_rgb.pt") if p.is_file()])
         if not self.chunk_files:
             raise FileNotFoundError(f"No *_rgb.pt chunk files in {splits_dir}")
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
@@ -513,6 +514,55 @@ def discover_chunked_videos(root: str, cache_size: int, persist_index: bool, all
     return vids
 
 
+def build_global_index_json(root: str, videos: List[ChunkedVideo], out_name: str = "dataset_index.json") -> Path:
+    """Create a JSON index describing all videos and their cumulative frame offsets.
+
+    The index structure:
+      {
+        "version": 1,
+        "root": "/abs/path/to/root",
+        "total_videos": N,
+        "total_frames": M,
+        "videos": [
+            {"id": "<video_id>", "rel_dir": "relative/path/from_root", "frames": F, "start": S, "end": E, "shape": [C,H,W]}, ...
+        ]
+      }
+
+    start/end define a half-open interval [start, end) in a global contiguous frame space.
+    """
+    root_path = Path(root).expanduser().resolve()
+    entries = []
+    cursor = 0
+    for v in videos:
+        rel_dir = str(Path(os.path.relpath(v.splits_dir, root_path)))
+        frames = v.num_frames
+        start = cursor
+        end = cursor + frames
+        entries.append({
+            "id": v.video_id,
+            "rel_dir": rel_dir,
+            "frames": frames,
+            "start": start,
+            "end": end,
+            "shape": list(v.frame_shape),
+        })
+        cursor = end
+    data = {
+        "version": 1,
+        "root": str(root_path),
+        "total_videos": len(videos),
+        "total_frames": cursor,
+        "videos": entries,
+    }
+    out_path = root_path / out_name
+    try:
+        out_path.write_text(json.dumps(data, indent=2))
+        print(f"Wrote global index: {out_path} (videos={len(videos)} frames={cursor})")
+    except Exception as e:
+        print(f"Failed to write global index {out_path}: {e}")
+    return out_path
+
+
 def process_videos_worker(videos: List[ChunkedVideo], args, gpu_rank: int, device: torch.device):
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
@@ -586,6 +636,9 @@ def main():
     else:
         if args.dry_run:
             print(f"Frame shape validation OK: all {len(videos_all)} videos share shape {ref_shape}")
+    # Optional global index build (only rank 0 to avoid race)
+    if args.build_global_index and args.rank == 0:
+        build_global_index_json(args.video_dir, videos_all)
     # Dry run: summarize and exit before any model loading
     if args.dry_run:
         # Build stats per video
