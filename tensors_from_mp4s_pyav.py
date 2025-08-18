@@ -78,7 +78,7 @@ def _atomic_save_tensor(tensor: torch.Tensor, out_path: str, verify: bool, max_r
 
             if verify:
                 # Reload and verify
-                reloaded = torch.load(tmp_path, map_location='cpu')
+                reloaded = torch.load(tmp_path, map_location='cpu', weights_only=True)
                 if not isinstance(reloaded, torch.Tensor):
                     raise ValueError('Reloaded object is not a tensor')
                 if reloaded.shape != tensor.shape or reloaded.dtype != tensor.dtype:
@@ -136,6 +136,7 @@ def decode_video(path, chunk_size, output_size, verify_save: bool = False):
             split_ind += 1
             del chunk
             gc.collect()
+            print(".", end='')
 
     if frames:
         chunk = to_tensor(frames)
