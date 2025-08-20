@@ -19,7 +19,7 @@ resources:
   image_id: us-central1-docker.pkg.dev/openworld-main/skypilot/spmem:v0.1
 workdir: .
 envs:
-  video_root: /mnt/data/shahbuland/video-proc-2/datasets/cod-yt
+  video_root: /mnt/data/ben/datasets/cod-yt-tensors
   output_dir: /mnt/data/ben/cod-yt-sliding-window
 
 setup: |
